@@ -1,0 +1,32 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试与工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.test-tmp/
+test_tmp/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# 本地代理与工具元数据
+.agents/
+.codex/
+
+# RAG 本地索引产物
+storage/
+docs/superpowers/

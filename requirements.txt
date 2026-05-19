@@ -1,0 +1,10 @@
+llama-index
+llama-index-readers-file
+openai
+chromadb
+rank-bm25
+pymupdf
+beautifulsoup4
+lxml
+markdownify
+jieba

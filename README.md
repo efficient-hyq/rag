@@ -220,6 +220,7 @@ rag/
 - [docs/项目流程文档.md](D:/ai/project/rag/docs/项目流程文档.md)
 - [docs/configuration.md](D:/ai/project/rag/docs/configuration.md)
 - [docs/RAG_设计方案.md](D:/ai/project/rag/docs/RAG_设计方案.md)
+- [docs/RAG_优化优先级与排期建议.md](D:/ai/project/rag/docs/RAG_优化优先级与排期建议.md)
 
 ## 11. 文档维护要求
 

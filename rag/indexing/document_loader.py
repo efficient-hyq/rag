@@ -69,9 +69,16 @@ def compute_document_content_hash(path: Path) -> str:
 
 
 def collect_current_markdown_state(root: str | Path) -> dict[str, str]:
+    return {
+        doc_key: compute_document_content_hash(path)
+        for doc_key, path in collect_current_markdown_files(root).items()
+    }
+
+
+def collect_current_markdown_files(root: str | Path) -> dict[str, Path]:
     docs_root = Path(root)
     return {
-        normalize_doc_key(path, docs_root): compute_document_content_hash(path)
+        normalize_doc_key(path, docs_root): path
         for path in iter_supported_files(docs_root)
     }
 

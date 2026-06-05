@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from collections import defaultdict
 from html import escape
 from pathlib import Path
@@ -10,13 +12,41 @@ def write_chunk_preview(nodes: list[Any], storage_dir: str | Path) -> Path:
     """导出中文友好的 chunk 预览页面，便于人工检查切分质量。"""
     output_path = Path(storage_dir) / "chunks_preview.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    groups = _group_nodes_by_doc_id(nodes)
+    output_path.write_text(_render_preview_html(groups), encoding="utf-8")
+    return output_path
 
+
+def write_document_chunk_previews(nodes: list[Any], storage_dir: str | Path) -> list[Path]:
+    """按 Markdown 文档导出 chunk 预览页，便于增量重建后定向检查。"""
+    output_root = Path(storage_dir) / "chunk_previews"
+    output_root.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for doc_id, doc_nodes in _group_nodes_by_doc_id(nodes).items():
+        output_path = output_root / f"{_safe_doc_file_name(doc_id)}.html"
+        output_path.write_text(
+            _render_preview_html({doc_id: doc_nodes}),
+            encoding="utf-8",
+        )
+        paths.append(output_path)
+    return paths
+
+
+def _group_nodes_by_doc_id(nodes: list[Any]) -> dict[str, list[Any]]:
     groups: dict[str, list[Any]] = defaultdict(list)
     for node in nodes:
         metadata = dict(getattr(node, "metadata", {}) or {})
-        doc_id = str(metadata.get("doc_id") or metadata.get("file_path") or "unknown")
+        doc_id = str(
+            metadata.get("cleaned_markdown_relative_path")
+            or metadata.get("doc_id")
+            or metadata.get("file_path")
+            or "unknown"
+        )
         groups[doc_id].append(node)
+    return dict(groups)
 
+
+def _render_preview_html(groups: dict[str, list[Any]]) -> str:
     sections = []
     for doc_id, doc_nodes in groups.items():
         cards = "\n".join(_render_node(node) for node in doc_nodes)
@@ -123,8 +153,15 @@ def write_chunk_preview(nodes: list[Any], storage_dir: str | Path) -> Path:
 </body>
 </html>
 """
-    output_path.write_text(html, encoding="utf-8")
-    return output_path
+    return html
+
+
+def _safe_doc_file_name(doc_id: str) -> str:
+    stem = re.sub(r"[^0-9A-Za-z._-]+", "_", doc_id.replace("\\", "/").replace("/", "__")).strip("_")
+    if not stem:
+        stem = "unknown"
+    suffix = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()[:12]
+    return f"{stem[:80]}-{suffix}"
 
 
 def _render_node(node: Any) -> str:

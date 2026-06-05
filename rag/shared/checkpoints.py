@@ -35,6 +35,18 @@ class CheckpointStore:
         self.content_embeddings_path = self.root / "embeddings_content.jsonl"
         self.summary_embeddings_path = self.root / "embeddings_summary.jsonl"
         self.manifest_path = self.root / "manifest.json"
+        self.document_index_state_path = self.root / "document_index_state.json"
+
+    def load_document_index_state(self) -> dict[str, Any]:
+        if not self.document_index_state_path.exists():
+            return {"docs": {}}
+        return json.loads(self.document_index_state_path.read_text(encoding="utf-8"))
+
+    def save_document_index_state(self, payload: dict[str, Any]) -> None:
+        self.document_index_state_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def write_manifest(self, payload: dict[str, Any]) -> None:
         self.manifest_path.write_text(
@@ -43,15 +55,54 @@ class CheckpointStore:
         )
 
     def write_chunks(self, nodes: Iterable[Any]) -> None:
-        with self.chunks_path.open("w", encoding="utf-8") as file:
-            for node in nodes:
-                record = {
+        records = []
+        for node in nodes:
+            records.append(
+                {
                     "node_id": node_key(node),
                     "text_hash": text_hash(str(getattr(node, "text", ""))),
                     "metadata": dict(getattr(node, "metadata", {}) or {}),
                     "text": str(getattr(node, "text", "")),
                 }
+            )
+        self.upsert_chunk_records(records)
+
+    def load_chunk_records(self) -> dict[str, dict[str, Any]]:
+        records: dict[str, dict[str, Any]] = {}
+        if not self.chunks_path.exists():
+            return records
+        with self.chunks_path.open("r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                node_id = str(record.get("node_id") or "")
+                if node_id:
+                    records[node_id] = record
+        return records
+
+    def upsert_chunk_records(self, records: Iterable[dict[str, Any]]) -> None:
+        current = self.load_chunk_records()
+        for record in records:
+            node_id = str(record.get("node_id") or "")
+            if node_id:
+                current[node_id] = dict(record)
+        self.chunks_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.chunks_path.open("w", encoding="utf-8") as file:
+            for record in current.values():
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def remove_node_records(self, node_ids: set[str]) -> None:
+        if not node_ids:
+            return
+        self._rewrite_chunk_records_without(node_ids)
+        self._rewrite_jsonl_without_node_keys(self.annotations_path, node_ids)
+        self._rewrite_jsonl_without_node_keys(self.content_embeddings_path, node_ids)
+        self._rewrite_jsonl_without_node_keys(self.summary_embeddings_path, node_ids)
+
+    def load_raw_records(self, path: Path) -> dict[str, dict[str, Any]]:
+        return self._load_jsonl_by_key(path)
 
     def load_annotations(self) -> dict[str, dict[str, Any]]:
         return {
@@ -121,6 +172,27 @@ class CheckpointStore:
             for item in records.values():
                 file.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+    def _rewrite_chunk_records_without(self, node_ids: set[str]) -> None:
+        records = {
+            node_id: record
+            for node_id, record in self.load_chunk_records().items()
+            if node_id not in node_ids
+        }
+        with self.chunks_path.open("w", encoding="utf-8") as file:
+            for record in records.values():
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _rewrite_jsonl_without_node_keys(self, path: Path, node_ids: set[str]) -> None:
+        records = {
+            key: record
+            for key, record in self._load_jsonl_by_key(path).items()
+            if not _checkpoint_key_matches_node(key, node_ids)
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            for record in records.values():
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     @staticmethod
     def _load_jsonl_by_key(path: Path) -> dict[str, dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
@@ -150,6 +222,11 @@ def text_hash(text: str) -> str:
 def stable_chunk_id(doc_id: str, chunk_index: int, text: str) -> str:
     raw = f"{doc_id}|{chunk_index}|{text_hash(text)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _checkpoint_key_matches_node(key: str, node_ids: set[str]) -> bool:
+    node_id = key.split("|", 1)[0]
+    return node_id in node_ids
 
 
 def print_progress(snapshot: ProgressSnapshot) -> None:

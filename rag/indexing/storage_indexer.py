@@ -4,6 +4,8 @@ import json
 import logging
 import math
 import pickle
+import re
+import hashlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +83,7 @@ class MultiRouteIndexer:
         self.chroma_dir = self.storage_dir / "chroma"
         self.bm25_path = self.storage_dir / "bm25.pkl"
         self.metadata_path = self.storage_dir / "metadata.json"
+        self.metadata_docs_dir = self.storage_dir / "metadata_docs"
         self.chroma_client = chroma_client
         self.tokenizer = tokenizer or tokenize_technical_text
 
@@ -89,6 +92,7 @@ class MultiRouteIndexer:
         nodes: list[Any],
         content_embeddings: list[list[float]],
         summary_embeddings: list[list[float]],
+        root_doc_dir: str | Path | None = None,
     ) -> IndexResult:
         logger = logging.getLogger("rag.indexer")
         self._validate(nodes, content_embeddings, summary_embeddings)
@@ -119,8 +123,9 @@ class MultiRouteIndexer:
         )
         logger.info("向量库写入完成 | collection=content_vec,summary_vec | chunk数=%s", len(nodes))
 
-        self._write_bm25(normalized_nodes)
-        self._write_metadata(normalized_nodes)
+        self.write_metadata_shards(normalized_nodes, root_doc_dir or self.storage_dir)
+        self.rebuild_metadata_snapshot()
+        self.rebuild_bm25_from_metadata_snapshot()
         logger.info("索引文件写入完成 | bm25=%s | metadata=%s", self.bm25_path, self.metadata_path)
         return IndexResult(
             node_count=len(nodes),
@@ -129,6 +134,72 @@ class MultiRouteIndexer:
             bm25_path=self.bm25_path,
             metadata_path=self.metadata_path,
         )
+
+    def delete_nodes(self, node_ids: set[str]) -> None:
+        if not node_ids:
+            return
+        ids = sorted(node_ids)
+        self._collection("content_vec").delete(ids=ids)
+        self._collection("summary_vec").delete(ids=ids)
+
+    def write_metadata_shards(self, nodes: list[Any], root_doc_dir: str | Path) -> None:
+        groups: dict[str, dict[str, dict[str, Any]]] = {}
+        for node in nodes:
+            normalized = normalize_node(node)
+            doc_key = doc_key_from_metadata(normalized["metadata"], Path(root_doc_dir))
+            record = {"text": normalized["text"]}
+            record.update(normalized["metadata"])
+            groups.setdefault(doc_key, {})[normalized["node_id"]] = record
+
+        self.metadata_docs_dir.mkdir(parents=True, exist_ok=True)
+        for doc_key, metadata in groups.items():
+            shard_path = self.metadata_docs_dir / shard_file_name(doc_key)
+            shard_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    def remove_metadata_shard(self, doc_key: str) -> None:
+        shard_path = self.metadata_docs_dir / shard_file_name(doc_key)
+        if shard_path.exists():
+            shard_path.unlink()
+
+    def rebuild_metadata_snapshot(self) -> dict[str, dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        self.metadata_docs_dir.mkdir(parents=True, exist_ok=True)
+        for shard_path in sorted(self.metadata_docs_dir.glob("*.json")):
+            payload = json.loads(shard_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                merged.update(
+                    {
+                        str(node_id): dict(metadata)
+                        for node_id, metadata in payload.items()
+                        if isinstance(metadata, dict)
+                    }
+                )
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_path.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return merged
+
+    def rebuild_bm25_from_metadata_snapshot(self) -> None:
+        if self.metadata_path.exists():
+            metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        else:
+            metadata = {}
+        nodes = [
+            {
+                "node_id": str(node_id),
+                "text": str(item.get("text") or ""),
+                "summary": str(item.get("summary") or ""),
+                "metadata": dict(item),
+            }
+            for node_id, item in metadata.items()
+            if isinstance(item, dict)
+        ]
+        self._write_bm25(nodes)
 
     def _collection(self, name: str) -> Any:
         client = self.chroma_client or self._build_chroma_client()
@@ -177,6 +248,19 @@ class MultiRouteIndexer:
 
 
 def normalize_node(node: Any) -> dict[str, Any]:
+    if isinstance(node, dict):
+        node_id = str(node.get("node_id") or node.get("id_") or "")
+        if not node_id:
+            raise ValueError("node 缺少 node_id/id_")
+        metadata = dict(node.get("metadata") or {})
+        summary = str(node.get("summary") or metadata.get("summary") or "")
+        return {
+            "node_id": node_id,
+            "text": str(node.get("text") or ""),
+            "summary": summary,
+            "metadata": metadata,
+        }
+
     node_id = str(getattr(node, "node_id", None) or getattr(node, "id_", None) or "")
     if not node_id:
         raise ValueError("node 缺少 node_id/id_")
@@ -217,3 +301,29 @@ def build_bm25(tokenized_corpus: list[list[str]]) -> Any:
         return BM25Okapi(tokenized_corpus)
     except ImportError:
         return SimpleBM25Okapi(tokenized_corpus)
+
+
+def doc_key_from_metadata(metadata: dict[str, Any], root_doc_dir: Path) -> str:
+    for key in ("cleaned_markdown_relative_path", "doc_id", "file_path", "filename"):
+        value = metadata.get(key)
+        if not value:
+            continue
+        raw_path = str(value).replace("\\", "/").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if path.suffix.lower() != ".md" and key != "cleaned_markdown_relative_path":
+            continue
+        try:
+            return path.resolve().relative_to(root_doc_dir.resolve()).as_posix().lower()
+        except ValueError:
+            return raw_path.lower()
+    return "unknown"
+
+
+def shard_file_name(doc_key: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", doc_key.replace("/", "__")).strip("_")
+    if not cleaned:
+        cleaned = "unknown"
+    suffix = hashlib.sha256(doc_key.encode("utf-8")).hexdigest()[:12]
+    return f"{cleaned[:80]}-{suffix}.json"

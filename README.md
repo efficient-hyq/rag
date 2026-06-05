@@ -28,12 +28,16 @@
 ### 2.2 离线建库
 
 - 读取清洗后的 Markdown 文档。
+- 默认按 `cleaned_markdown` Markdown 文档做增量建库。
+- 未变化 Markdown 文档复用现有标注、向量检查点和索引元数据。
+- 变更 Markdown 文档会先删除旧 `node_id`，再重建该文档全部 chunk。
+- 已删除 Markdown 文档会自动清理旧向量、检查点和 metadata 分片。
 - 按 Markdown 语义块进行切分，尽量避免拆断代码块和表格。
 - 使用 LLM 为 chunk 生成摘要、关键词、标签、类型、完整度等语义元数据。
 - 生成正文向量和摘要向量两路 embedding。
 - 写入 Chroma 向量库、BM25 索引和 `metadata.json`。
 - 生成 chunk 预览页与检查点，支持断点续跑。
-- `chunks_preview.html` 额外展示每个 chunk 的 `node_id`。
+- `chunk_previews/` 按文档输出预览页，每个 chunk 展示 `node_id`。
 
 核心文件：
 
@@ -170,6 +174,8 @@ rag/
 .venv/Scripts/python.exe -m rag.cli.build_index --docs-dir "./storage/cleaned_markdown" --storage-dir "./storage"
 ```
 
+`build_index` 默认按 Markdown 文档增量执行：新增和变更文档会重建，未变化文档复用现有索引，删除文档会清理旧 `node_id`。
+
 ### 6.3 执行完整查询
 
 ```bash
@@ -199,9 +205,11 @@ rag/
 | `storage/checkpoints/embeddings_content.jsonl` | 正文向量检查点 |
 | `storage/checkpoints/embeddings_summary.jsonl` | 摘要向量检查点 |
 | `storage/checkpoints/manifest.json` | 本次建库参数快照 |
+| `storage/checkpoints/document_index_state.json` | Markdown 文档级索引状态清单 |
+| `storage/metadata_docs/` | 按 Markdown 文档分片的 metadata |
 | `storage/bm25.pkl` | BM25 索引 |
 | `storage/metadata.json` | 全量 chunk 元数据 |
-| `storage/chunks_preview.html` | chunk 人工预览页面，包含 `node_id` |
+| `storage/chunk_previews/` | 按文档输出的 chunk 人工预览页面，包含 `node_id` |
 
 ## 9. 测试与验证
 

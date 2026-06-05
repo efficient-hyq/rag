@@ -27,6 +27,12 @@
 | `RAG_CHUNK_SIZE` | chunk 大小 | `512` |
 | `RAG_CHUNK_OVERLAP` | chunk 重叠大小 | `100` |
 
+说明：
+
+- `build_index` 默认按 `RAG_DOCS_DIR` 下的 Markdown 文档做文档级增量建库。
+- 未变化文档复用现有标注、向量检查点和 metadata 分片。
+- 新增或变更文档会重建该文档全部 chunk；删除文档会清理旧 `node_id`。
+
 ## 3. LLM 配置
 
 当前标注、改写、精排和答案生成都通过 OpenAI 兼容接口调用。
@@ -144,10 +150,12 @@ set RAG_ANSWER_ENABLED=false
 | `storage/checkpoints/embeddings_content.jsonl` | 正文向量检查点 |
 | `storage/checkpoints/embeddings_summary.jsonl` | 摘要向量检查点 |
 | `storage/checkpoints/manifest.json` | 本次建库参数快照 |
+| `storage/checkpoints/document_index_state.json` | Markdown 文档级索引状态清单 |
 | `storage/chroma/` | Chroma 持久化目录 |
 | `storage/bm25.pkl` | BM25 索引文件 |
-| `storage/metadata.json` | 全量 chunk 元数据 |
-| `storage/chunks_preview.html` | chunk 预览页面，包含 `node_id` |
+| `storage/metadata_docs/` | 按 Markdown 文档分片的 metadata |
+| `storage/metadata.json` | 兼容查询侧的全量 chunk 元数据快照 |
+| `storage/chunk_previews/` | 按文档输出的 chunk 预览页面，包含 `node_id` |
 
 ## 9. 风险提示
 
@@ -156,3 +164,4 @@ set RAG_ANSWER_ENABLED=false
 - LLM 与 Embedding 的 Base URL 不要混用
 - 查询侧虽然默认使用 `qwen3.6-plus`，但仍依赖兼容接口可用性
 - 若关闭 `RAG_ANSWER_ENABLED`，命令行会退回到基于检索结果的摘要输出
+- 若 `metadata_docs/`、`metadata.json` 与 Chroma 内容不一致，优先检查 `document_index_state.json` 中的 `node_ids`

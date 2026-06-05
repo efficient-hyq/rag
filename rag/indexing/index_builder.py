@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from rag.config import BuildIndexConfig
-from rag.indexing.document_loader import load_documents
+from rag.indexing.document_loader import (
+    MarkdownDocumentDiff,
+    collect_current_markdown_state,
+    diff_markdown_documents,
+    load_documents,
+)
 from rag.indexing.embedding_client import (
     build_openai_compatible_embedder,
     embed_nodes_with_checkpoint,
@@ -17,6 +22,12 @@ from rag.indexing.semantic_annotator import SemanticAnnotator
 from rag.indexing.storage_indexer import IndexResult, MultiRouteIndexer
 from rag.shared.checkpoints import CheckpointStore
 from rag.shared.logging_utils import log_phase
+
+
+def build_markdown_diff(docs_root: Path, checkpoint: CheckpointStore) -> MarkdownDocumentDiff:
+    previous_state = checkpoint.load_document_index_state()
+    current_hashes = collect_current_markdown_state(docs_root)
+    return diff_markdown_documents(previous_state, current_hashes)
 
 
 def build_offline_index(

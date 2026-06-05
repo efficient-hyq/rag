@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from llama_index.core import Document, SimpleDirectoryReader
 
 
 SUPPORTED_SUFFIXES = {".md"}
 SOURCE_MANIFEST_FILENAME = "source_manifest.json"
+
+
+@dataclass(frozen=True)
+class MarkdownDocumentDiff:
+    added: set[str]
+    changed: set[str]
+    deleted: set[str]
+    unchanged: set[str]
 
 
 def load_documents(input_dir: str | Path, recursive: bool = True) -> list[Document]:
@@ -29,6 +39,68 @@ def load_documents(input_dir: str | Path, recursive: bool = True) -> list[Docume
         _normalize_document_metadata(document, root, source_manifest)
         for document in documents
     ]
+
+
+def load_documents_from_files(files: list[Path], root: str | Path) -> list[Document]:
+    """只加载指定 Markdown 文件，用于文档级增量重建。"""
+    if not files:
+        return []
+
+    docs_root = Path(root)
+    source_manifest = load_source_manifest(docs_root)
+    reader = SimpleDirectoryReader(
+        input_files=[str(path) for path in files],
+        filename_as_id=True,
+        required_exts=sorted(SUPPORTED_SUFFIXES),
+    )
+    documents = reader.load_data()
+    return [
+        _normalize_document_metadata(document, docs_root, source_manifest)
+        for document in documents
+    ]
+
+
+def normalize_doc_key(path: Path, root: str | Path) -> str:
+    return path.resolve().relative_to(Path(root).resolve()).as_posix().lower()
+
+
+def compute_document_content_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def collect_current_markdown_state(root: str | Path) -> dict[str, str]:
+    docs_root = Path(root)
+    return {
+        normalize_doc_key(path, docs_root): compute_document_content_hash(path)
+        for path in iter_supported_files(docs_root)
+    }
+
+
+def diff_markdown_documents(
+    previous_state: dict[str, Any],
+    current_hashes: dict[str, str],
+) -> MarkdownDocumentDiff:
+    previous_docs = {
+        str(key): dict(value)
+        for key, value in previous_state.get("docs", {}).items()
+        if isinstance(value, dict)
+    }
+    previous_keys = set(previous_docs)
+    current_keys = set(current_hashes)
+    added = current_keys - previous_keys
+    deleted = previous_keys - current_keys
+    changed = {
+        key
+        for key in current_keys & previous_keys
+        if str(previous_docs[key].get("content_hash") or "") != current_hashes[key]
+    }
+    unchanged = (current_keys & previous_keys) - changed
+    return MarkdownDocumentDiff(
+        added=added,
+        changed=changed,
+        deleted=deleted,
+        unchanged=unchanged,
+    )
 
 
 def load_source_manifest(input_dir: str | Path) -> dict[str, dict[str, str]]:

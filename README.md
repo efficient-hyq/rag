@@ -72,6 +72,15 @@
 - [rag/retrieval/tokenization.py](D:/ai/project/rag/rag/retrieval/tokenization.py)
 - [rag/cli/answer_query.py](D:/ai/project/rag/rag/cli/answer_query.py)
 
+### 2.4 隐式业务依赖召回（规划中）
+
+- chunk 自动标注规范化依赖主题，并由 Markdown 解析器生成标题路径。
+- 按单个文档聚合全部 `node_id` 的直接依赖关系，没有依赖的 node 使用空数组。
+- 普通召回命中 seed node 后，根据 `node_dependencies` 直接补充同文档依赖 node。
+- topic 用于展示、覆盖检查和依赖关系向量化，`node_id` 用于精确取得依赖证据。
+
+完整设计见：[docs/隐式业务依赖漏召回解决方案.md](D:/ai/project/rag/docs/隐式业务依赖漏召回解决方案.md)
+
 ## 3. 项目结构
 
 ```text
@@ -210,6 +219,7 @@ rag/
 | `storage/bm25.pkl` | BM25 索引 |
 | `storage/metadata.json` | 全量 chunk 元数据 |
 | `storage/chunk_previews/` | 按文档输出的 chunk 人工预览页面，包含 `node_id` |
+| `storage/dependency_cards.json` | 规划中的文档级 node 依赖关系图，记录依赖 node 和规范化 topic |
 
 ## 9. 测试与验证
 
@@ -229,6 +239,7 @@ rag/
 - [docs/configuration.md](D:/ai/project/rag/docs/configuration.md)
 - [docs/RAG_设计方案.md](D:/ai/project/rag/docs/RAG_设计方案.md)
 - [docs/RAG_优化优先级与排期建议.md](D:/ai/project/rag/docs/RAG_优化优先级与排期建议.md)
+- [docs/隐式业务依赖漏召回解决方案.md](D:/ai/project/rag/docs/隐式业务依赖漏召回解决方案.md)
 
 ## 11. 文档维护要求
 

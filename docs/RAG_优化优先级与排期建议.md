@@ -97,15 +97,13 @@
 
 **建议动作**
 
-1. 离线标注新增依赖型字段，例如：
-   - `prerequisites`
-   - `constraints`
-   - `related_api`
-   - `related_config`
-   - `risk_points`
-2. 在线查询增加“业务依赖扩展改写”，不只做同义词改写，还要显式补充签名、回调、权限、异常处理等前置主题
-3. 引入“文档级/章节级聚合召回”，避免仅凭单 chunk 相似度决策
-4. 建立“接入类问题”的专项评测集，专门检查是否漏掉前置条件
+1. 每个 chunk 仅新增 `dependency_topics`，并由 Markdown 解析器自动补充 `heading_path`，避免人工标注和过多语义字段
+2. 按单个文档聚合全部 node，生成包含完整 `node_dependencies` 的 `dependency_cards.json`；没有依赖的 node 使用空数组
+3. 在线先执行现有普通混合召回，再根据 seed `node_id` 直接扩展依赖 node，不根据 topic 做全库模糊搜索
+4. 在依赖边上保留规范化 `topic_code` 和展示用 `topic_name`，用于解释、分组、覆盖检查和依赖关系向量化
+5. 建立“接入类问题”的专项评测集，专门检查依赖 node 是否被补召回
+
+完整设计见：[docs/隐式业务依赖漏召回解决方案.md](D:/ai/project/rag/docs/隐式业务依赖漏召回解决方案.md)
 
 **优先级判断**
 

@@ -11,6 +11,7 @@ from typing import Any
 
 from openai import OpenAI
 
+from rag.indexing.dependency_topics import normalize_dependency_topics
 from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress
 
 
@@ -21,6 +22,7 @@ EMPTY_ANNOTATION = {
     "type": "text",
     "has_code": False,
     "coherence": "medium",
+    "dependency_topics": [],
 }
 
 
@@ -46,7 +48,7 @@ class SemanticAnnotator:
         max_retries: int = 3,
         client: OpenAI | None = None,
         prompt: str | None = None,
-        prompt_version: str = "annotation_v2",
+        prompt_version: str = "annotation_v4",
     ) -> None:
         if not api_key and client is None:
             raise ValueError("缺少 LLM API Key，请设置 DASHSCOPE_API_KEY")
@@ -101,7 +103,9 @@ class SemanticAnnotator:
 
                 self._apply_annotation(node, annotation)
                 if checkpoint:
-                    checkpoint.append_annotation(key, annotation, status=status, error=error)
+                    checkpoint.append_annotation(
+                        key, annotation, status=status, error=error, model=self.model
+                    )
                 completed += 1
                 if show_progress:
                     print_progress(ProgressSnapshot("标注", len(nodes), completed, failed))
@@ -132,7 +136,7 @@ class SemanticAnnotator:
         return dict(EMPTY_ANNOTATION)
 
     def _cache_key(self, node: Any) -> str:
-        return f"{node_key(node)}|annotation|{self.model}|{self.prompt_version}"
+        return f"{node_key(node)}|annotation|{self.prompt_version}"
 
     @staticmethod
     def _apply_annotation(node: Any, annotation: dict[str, Any]) -> None:
@@ -158,11 +162,12 @@ def normalize_annotation(raw: dict[str, Any]) -> dict[str, Any]:
     annotation["type"] = _enum(annotation.get("type"), {"text", "api", "code", "table"}, "text")
     annotation["has_code"] = bool(annotation.get("has_code"))
     annotation["coherence"] = _enum(annotation.get("coherence"), {"high", "medium", "low"}, "medium")
+    annotation["dependency_topics"] = normalize_dependency_topics(annotation.get("dependency_topics"))
     return annotation
 
 
 def load_annotation_prompt(path: str | Path | None = None) -> str:
-    prompt_path = Path(path) if path is not None else Path("prompts/annotation_v2.md")
+    prompt_path = Path(path) if path is not None else Path("prompts/annotation_v4.md")
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8").strip()
     return DEFAULT_ANNOTATION_PROMPT
@@ -195,7 +200,8 @@ DEFAULT_ANNOTATION_PROMPT = """
   "tags": ["1 到 8 个主题标签"],
   "type": "text|api|code|table",
   "has_code": true,
-  "coherence": "high|medium|low"
+  "coherence": "high|medium|low",
+  "dependency_topics": ["LLM 自由概括的简短依赖主题，最多 5 个"]
 }
 
 标注规则：
@@ -205,4 +211,7 @@ DEFAULT_ANNOTATION_PROMPT = """
 - type 判断主内容类型：接口说明为 api，代码占主要内容为 code，表格占主要信息为 table，其余为 text。
 - has_code 仅在出现代码块、命令、配置片段、函数签名或 JSON/YAML 示例时为 true。
 - coherence 表示该 chunk 独立可理解程度：high 独立完整；medium 需要少量上下文；low 明显残缺、跨页断裂或只有碎片。
+- dependency_topics 由你根据原文自由概括为简短、可读的中文主题；不受固定词表约束，原文没有依据时返回空数组，不根据通用常识补充，最多 5 个。
+- dependency_topics 表示当前 chunk 提供的依赖能力证据，不表示页面类型或依赖关系类型；仅提及名词但未提供规则、配置、约束或操作证据时不要标注。
+- 通常返回 0 到 3 个 topic，优先使用原文中的稳定业务术语。
 """.strip()

@@ -28,11 +28,13 @@ def split_documents(
             or getattr(document, "doc_id", None)
             or getattr(document, "id_", "unknown")
         )
-        chunks = split_markdown_text(document.get_content(), chunk_size, chunk_overlap)
-        for chunk_index, chunk_text in enumerate(chunks):
+        chunks = split_markdown_chunks(document.get_content(), chunk_size, chunk_overlap)
+        for chunk_index, item in enumerate(chunks):
+            chunk_text = item["text"]
             chunk_metadata = dict(metadata)
             chunk_metadata["chunk_index"] = chunk_index
             chunk_metadata["token_size"] = estimate_token_size(chunk_text)
+            chunk_metadata["heading_path"] = item["heading_path"]
             nodes.append(
                 TextNode(
                     id_=stable_chunk_id(doc_id, chunk_index, chunk_text),
@@ -45,34 +47,64 @@ def split_documents(
 
 def split_markdown_text(markdown: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     """按 Markdown 语义块切分，尽量避免拆断表格和代码块。"""
+    return [item["text"] for item in split_markdown_chunks(markdown, chunk_size, chunk_overlap)]
+
+
+def split_markdown_chunks(markdown: str, chunk_size: int, chunk_overlap: int) -> list[dict[str, str]]:
+    """切分 chunk，并为每个 chunk 记录程序生成的标题路径。"""
     blocks = list(split_markdown_blocks(markdown))
-    chunks: list[str] = []
+    chunks: list[dict[str, str]] = []
     current_blocks: list[str] = []
     current_tokens = 0
+    current_heading_path = ""
+    heading_stack: list[str] = []
+
+    def update_heading(block: str) -> None:
+        nonlocal heading_stack
+        match = re.match(r"^(#+)\s+(.+?)\s*$", block)
+        if not match:
+            return
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        heading_stack = heading_stack[: level - 1]
+        heading_stack.append(title)
+
+    def append_chunk(blocks: list[str], path: str) -> None:
+        text = "\n\n".join(blocks).strip()
+        if text:
+            chunks.append({"text": text, "heading_path": path})
 
     for block in blocks:
+        is_heading = re.match(r"^#+\s+", block) is not None
+        update_heading(block)
+        block_heading_path = " > ".join(heading_stack)
         block_tokens = estimate_token_size(block)
         if current_blocks and current_tokens + block_tokens > chunk_size:
-            chunks.append("\n\n".join(current_blocks).strip())
+            append_chunk(current_blocks, current_heading_path)
             overlap_blocks = _pick_overlap_blocks(current_blocks, chunk_overlap)
             current_blocks = overlap_blocks[:]
             current_tokens = estimate_token_size("\n\n".join(current_blocks)) if current_blocks else 0
+            if not current_blocks:
+                current_heading_path = block_heading_path
+
+        if not current_blocks or is_heading:
+            current_heading_path = block_heading_path
 
         if block_tokens > chunk_size and not _is_atomic_markdown_block(block):
             for part in _split_large_text_block(block, chunk_size):
                 if current_blocks:
-                    chunks.append("\n\n".join(current_blocks).strip())
+                    append_chunk(current_blocks, current_heading_path)
                     current_blocks = []
                     current_tokens = 0
-                chunks.append(part.strip())
+                append_chunk([part.strip()], current_heading_path)
             continue
 
         current_blocks.append(block)
         current_tokens += block_tokens
 
     if current_blocks:
-        chunks.append("\n\n".join(current_blocks).strip())
-    return [chunk for chunk in chunks if chunk.strip()]
+        append_chunk(current_blocks, current_heading_path)
+    return chunks
 
 
 def split_markdown_blocks(markdown: str) -> Iterable[str]:

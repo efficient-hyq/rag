@@ -11,6 +11,7 @@ from rag.config.common import (
     load_embedding_config_from_env,
     load_llm_service_config_from_env,
     load_path_config_from_env,
+    get_bool_env,
 )
 
 
@@ -28,8 +29,18 @@ class AnnotationConfig:
 
     model: str = "qwen3.6-plus"
     workers: int = 5
-    prompt_path: Path = Path("prompts/annotation_v2.md")
-    prompt_version: str = "annotation_v2"
+    prompt_path: Path = Path("prompts/annotation_v4.md")
+    prompt_version: str = "annotation_v4"
+
+
+@dataclass(frozen=True)
+class DependencyGraphConfig:
+    """文档级依赖图与可选依赖向量配置。"""
+
+    model: str = "qwen3.6-plus"
+    prompt_path: Path = Path("prompts/dependency_graph_v3.md")
+    prompt_version: str = "dependency_graph_v3"
+    vector_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +52,7 @@ class BuildIndexConfig:
     embedding: EmbeddingConfig
     chunking: ChunkingConfig
     annotation: AnnotationConfig
+    dependency: DependencyGraphConfig
 
     @classmethod
     def from_env(cls) -> "BuildIndexConfig":
@@ -58,7 +70,13 @@ class BuildIndexConfig:
             annotation=AnnotationConfig(
                 model=os.getenv("RAG_ANNOTATOR_MODEL", "qwen3.6-plus"),
                 workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "5")),
-                prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v2.md")),
-                prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v2"),
+                prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v4.md")),
+                prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v4"),
+            ),
+            dependency=DependencyGraphConfig(
+                model=os.getenv("RAG_DEPENDENCY_GRAPH_MODEL", "qwen3.6-plus"),
+                prompt_path=Path(os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_PATH", "prompts/dependency_graph_v3.md")),
+                prompt_version=os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_VERSION","dependency_graph_v3",),
+                vector_enabled=get_bool_env("RAG_DEPENDENCY_VECTOR_ENABLED", False),
             ),
         )

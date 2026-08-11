@@ -142,6 +142,30 @@ class MultiRouteIndexer:
         self._collection("content_vec").delete(ids=ids)
         self._collection("summary_vec").delete(ids=ids)
 
+    def delete_dependency_nodes(self, node_ids: set[str]) -> None:
+        if node_ids:
+            self._collection("dependency_vec").delete(ids=sorted(node_ids))
+
+    def index_dependency_vectors(
+        self,
+        records: list[dict[str, Any]],
+        embeddings: list[list[float]],
+    ) -> None:
+        if len(records) != len(embeddings):
+            raise ValueError("dependency embeddings 数量必须与记录数一致")
+        if not records:
+            return
+        metadatas = []
+        for record in records:
+            metadata = dict(record.get("metadata") or {})
+            metadatas.append(sanitize_chroma_metadata(metadata))
+        self._collection("dependency_vec").upsert(
+            ids=[str(record["node_id"]) for record in records],
+            embeddings=embeddings,
+            documents=[str(record.get("text") or "") for record in records],
+            metadatas=metadatas,
+        )
+
     def write_metadata_shards(self, nodes: list[Any], root_doc_dir: str | Path) -> None:
         groups: dict[str, dict[str, dict[str, Any]]] = {}
         for node in nodes:
@@ -296,6 +320,8 @@ def tokens_for_bm25(node: dict[str, Any], tokenizer: Callable[[str], list[str]])
 
 
 def build_bm25(tokenized_corpus: list[list[str]]) -> Any:
+    if not tokenized_corpus:
+        return SimpleBM25Okapi(tokenized_corpus)
     try:
         from rank_bm25 import BM25Okapi
         return BM25Okapi(tokenized_corpus)

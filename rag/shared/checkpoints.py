@@ -34,6 +34,7 @@ class CheckpointStore:
         self.annotations_path = self.root / "annotations.jsonl"
         self.content_embeddings_path = self.root / "embeddings_content.jsonl"
         self.summary_embeddings_path = self.root / "embeddings_summary.jsonl"
+        self.dependency_cards_path = self.root / "dependency_cards.jsonl"
         self.manifest_path = self.root / "manifest.json"
         self.document_index_state_path = self.root / "document_index_state.json"
 
@@ -105,11 +106,11 @@ class CheckpointStore:
         return self._load_jsonl_by_key(path)
 
     def load_annotations(self) -> dict[str, dict[str, Any]]:
-        return {
-            key: dict(record.get("annotation") or {})
-            for key, record in self._load_jsonl_by_key(self.annotations_path).items()
-            if record.get("status") == "success"
-        }
+        result: dict[str, dict[str, Any]] = {}
+        for key, record in self._load_jsonl_by_key(self.annotations_path).items():
+            if record.get("status") == "success":
+                result[_annotation_cache_identity(key)] = dict(record.get("annotation") or {})
+        return result
 
     def append_annotation(
         self,
@@ -117,6 +118,7 @@ class CheckpointStore:
         annotation: dict[str, Any],
         status: str = "success",
         error: str | None = None,
+        model: str | None = None,
     ) -> None:
         self._upsert_jsonl(
             self.annotations_path,
@@ -124,9 +126,81 @@ class CheckpointStore:
                 "key": key,
                 "status": status,
                 "annotation": annotation,
+                "model": model or _model_from_annotation_key(key),
                 "error": error,
             },
         )
+
+    def load_dependency_cards(self) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for key, record in self._load_jsonl_by_key(self.dependency_cards_path).items():
+            if record.get("status") == "success":
+                card = dict(record.get("card") or {})
+                if record.get("model") and not card.get("model"):
+                    card["model"] = record["model"]
+                result[_dependency_cache_identity(key)] = card
+        return result
+
+    def append_dependency_card(self, key: str, card: dict[str, Any]) -> None:
+        self._upsert_jsonl(
+            self.dependency_cards_path,
+            {
+                "key": key,
+                "status": str(card.get("status") or "failed"),
+                "model": card.get("model"),
+                "card": card,
+            },
+        )
+
+    def migrate_model_agnostic_records(self) -> dict[str, int]:
+        """将旧版带模型 key 的成功 LLM 检查点原地转换为稳定 key。"""
+        annotation_count = self._migrate_jsonl_keys(self.annotations_path, _annotation_cache_identity)
+        dependency_count = self._migrate_jsonl_keys(self.dependency_cards_path, _dependency_cache_identity)
+        return {"annotations": annotation_count, "dependency_cards": dependency_count}
+
+    def _migrate_jsonl_keys(self, path: Path, identity_fn: Any) -> int:
+        records = self._load_jsonl_by_key(path)
+        migrated = 0
+        changed = False
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, record in records.items():
+            new_key = identity_fn(key)
+            if new_key != key:
+                migrated += 1
+                changed = True
+            record["key"] = new_key
+            if path == self.annotations_path:
+                if not record.get("model") and _model_from_annotation_key(key):
+                    record["model"] = _model_from_annotation_key(key)
+                    changed = True
+            elif path == self.dependency_cards_path and not record.get("model"):
+                card = record.get("card") if isinstance(record.get("card"), dict) else {}
+                model = card.get("model") or _model_from_dependency_key(key)
+                if model:
+                    record["model"] = model
+                    changed = True
+            current = normalized.get(new_key)
+            if current and current.get("status") == "success" and record.get("status") != "success":
+                continue
+            normalized[new_key] = record
+        if changed:
+            with path.open("w", encoding="utf-8") as file:
+                for record in normalized.values():
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return migrated
+
+    def remove_dependency_documents(self, doc_keys: set[str]) -> None:
+        if not doc_keys:
+            return
+        records = {
+            key: record
+            for key, record in self._load_jsonl_by_key(self.dependency_cards_path).items()
+            if not any(key.startswith(f"{doc_key}|") for doc_key in doc_keys)
+        }
+        self.dependency_cards_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.dependency_cards_path.open("w", encoding="utf-8") as file:
+            for record in records.values():
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def load_embeddings(self, route: str) -> dict[str, list[float]]:
         path = self._embedding_path(route)
@@ -227,6 +301,30 @@ def stable_chunk_id(doc_id: str, chunk_index: int, text: str) -> str:
 def _checkpoint_key_matches_node(key: str, node_ids: set[str]) -> bool:
     node_id = key.split("|", 1)[0]
     return node_id in node_ids
+
+
+def _annotation_cache_identity(key: str) -> str:
+    parts = key.split("|")
+    if len(parts) >= 4 and parts[1] == "annotation":
+        return "|".join((parts[0], parts[1], parts[-1]))
+    return key
+
+
+def _dependency_cache_identity(key: str) -> str:
+    parts = key.split("|")
+    if len(parts) >= 4:
+        return "|".join((parts[0], parts[1], parts[-1]))
+    return key
+
+
+def _model_from_annotation_key(key: str) -> str | None:
+    parts = key.split("|")
+    return parts[2] if len(parts) >= 4 and parts[1] == "annotation" else None
+
+
+def _model_from_dependency_key(key: str) -> str | None:
+    parts = key.split("|")
+    return parts[-2] if len(parts) >= 4 else None
 
 
 def print_progress(snapshot: ProgressSnapshot) -> None:

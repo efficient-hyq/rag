@@ -32,7 +32,7 @@ class EmbeddingConfig:
     api_key: str | None = None
     base_url: str = DEFAULT_OPENAI_COMPATIBLE_BASE_URL
     model: str = "text-embedding-v4"
-    batch_size: int = 10
+    batch_size: int = 20
 
 
 def load_path_config_from_env() -> PathConfig:
@@ -57,7 +57,7 @@ def load_embedding_config_from_env(llm: LLMServiceConfig) -> EmbeddingConfig:
         api_key=os.getenv("RAG_EMBEDDING_API_KEY"),
         base_url=os.getenv("RAG_EMBEDDING_BASE_URL", DEFAULT_EMBEDDING_BASE_URL),
         model=os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-v4"),
-        batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "10")),
+        batch_size=int(os.getenv("RAG_EMBEDDING_BATCH_SIZE", "20")),
     )
 
 

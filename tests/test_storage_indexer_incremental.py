@@ -88,3 +88,13 @@ class IncrementalStorageIndexerTest(unittest.TestCase):
             payload = pickle.load(file)
         self.assertIsInstance(payload, StoredBM25Index)
         self.assertEqual(payload.node_ids, ["node-a", "node-b"])
+
+    def test_rebuild_bm25_accepts_empty_metadata_snapshot(self) -> None:
+        (self.storage_dir / "metadata.json").write_text("{}", encoding="utf-8")
+
+        self.indexer.rebuild_bm25_from_metadata_snapshot()
+
+        with self.indexer.bm25_path.open("rb") as file:
+            payload = pickle.load(file)
+        self.assertEqual(payload.node_ids, [])
+        self.assertEqual(payload.bm25.get_scores(["query"]), [])

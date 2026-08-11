@@ -90,3 +90,73 @@ class IncrementalCheckpointStoreTest(unittest.TestCase):
             "old-node|embedding|summary|model|summary:abc",
             self.store.load_raw_records(self.store.summary_embeddings_path),
         )
+
+    def test_load_llm_checkpoints_ignores_model_in_legacy_keys(self) -> None:
+        self.store.append_annotation(
+            "node-1|annotation|deepseek-v4-flash|annotation_v4",
+            {"summary": "已完成标注"},
+        )
+        self.store.append_dependency_card(
+            "doc.md|hash-1|deepseek-v4-flash|dependency_graph_v3",
+            {
+                "status": "success",
+                "model": "deepseek-v4-flash",
+                "node_dependencies": {"node-1": []},
+            },
+        )
+
+        self.assertEqual(
+            self.store.load_annotations()["node-1|annotation|annotation_v4"]["summary"],
+            "已完成标注",
+        )
+        card = self.store.load_dependency_cards()["doc.md|hash-1|dependency_graph_v3"]
+        self.assertEqual(card["model"], "deepseek-v4-flash")
+
+    def test_migrate_llm_checkpoints_keeps_model_as_metadata(self) -> None:
+        self.store.append_annotation(
+            "node-1|annotation|deepseek-v4-flash|annotation_v4",
+            {"summary": "已完成标注"},
+        )
+        self.store.append_dependency_card(
+            "doc.md|hash-1|deepseek-v4-flash|dependency_graph_v3",
+            {
+                "status": "success",
+                "model": "deepseek-v4-flash",
+                "node_dependencies": {"node-1": []},
+            },
+        )
+
+        counts = self.store.migrate_model_agnostic_records()
+
+        annotations = self.store.load_raw_records(self.store.annotations_path)
+        dependencies = self.store.load_raw_records(self.store.dependency_cards_path)
+        self.assertEqual(counts, {"annotations": 1, "dependency_cards": 1})
+        self.assertEqual(
+            annotations["node-1|annotation|annotation_v4"]["model"],
+            "deepseek-v4-flash",
+        )
+        self.assertEqual(
+            dependencies["doc.md|hash-1|dependency_graph_v3"]["model"],
+            "deepseek-v4-flash",
+        )
+
+    def test_migrate_prefers_success_when_models_have_conflicting_records(self) -> None:
+        self.store.append_annotation(
+            "node-1|annotation|model-success|annotation_v4",
+            {"summary": "可复用结果"},
+            model="model-success",
+        )
+        self.store.append_annotation(
+            "node-1|annotation|model-failed|annotation_v4",
+            {"summary": ""},
+            status="failed",
+            model="model-failed",
+        )
+
+        self.store.migrate_model_agnostic_records()
+
+        record = self.store.load_raw_records(self.store.annotations_path)[
+            "node-1|annotation|annotation_v4"
+        ]
+        self.assertEqual(record["status"], "success")
+        self.assertEqual(record["model"], "model-success")

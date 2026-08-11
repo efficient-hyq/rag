@@ -20,6 +20,9 @@ class IncrementalIndexBuilderTest(unittest.TestCase):
         checkpoint = CheckpointStore(storage_dir)
         checkpoint.save_document_index_state(
             {
+                "annotation_prompt_version": "annotation_v4",
+                "dependency_prompt_version": "dependency_graph_v3",
+                "topic_registry_version": "应被忽略的旧字段",
                 "docs": {
                     "a.md": {
                         "content_hash": "old",
@@ -65,6 +68,9 @@ class IncrementalIndexBuilderTest(unittest.TestCase):
         checkpoint = CheckpointStore(storage_dir)
         checkpoint.save_document_index_state(
             {
+                "annotation_prompt_version": "annotation_v4",
+                "dependency_prompt_version": "dependency_graph_v3",
+                "topic_registry_version": "应被忽略的旧字段",
                 "docs": {
                     "a.md": {
                         "content_hash": compute_document_content_hash(docs_dir / "a.md"),

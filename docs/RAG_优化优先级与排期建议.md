@@ -100,8 +100,7 @@
 1. 每个 chunk 仅新增 `dependency_topics`，并由 Markdown 解析器自动补充 `heading_path`，避免人工标注和过多语义字段
 2. 按单个文档聚合全部 node，生成包含完整 `node_dependencies` 的 `dependency_cards.json`；没有依赖的 node 使用空数组
 3. 在线先执行现有普通混合召回，再根据 seed `node_id` 直接扩展依赖 node，不根据 topic 做全库模糊搜索
-4. 在依赖边上保留规范化 `topic_code` 和展示用 `topic_name`，用于解释、分组、覆盖检查和依赖关系向量化
-5. 建立“接入类问题”的专项评测集，专门检查依赖 node 是否被补召回
+4. 允许依赖边携带 LLM 自由生成的可选 `topic` 用于解释和向量文本补充，但不让 topic 参与边有效性、增量失效或精确取证判断
 
 完整设计见：[docs/隐式业务依赖漏召回解决方案.md](D:/ai/project/rag/docs/隐式业务依赖漏召回解决方案.md)
 

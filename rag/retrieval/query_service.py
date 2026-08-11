@@ -7,7 +7,9 @@ from openai import OpenAI
 
 from rag.config import QueryConfig
 from rag.indexing.embedding_client import build_openai_compatible_embedder
+from rag.indexing.publication import validate_query_embedding_model
 from rag.retrieval.answer_generator import AnswerGenerator, AnswerReference
+from rag.retrieval.dependency_recall import DependencyRecallRouter
 from rag.retrieval.ranking import DualStageReranker, LLMReranker, QueryRewriter, RuleBasedReranker
 from rag.retrieval.retriever import HybridRetriever, RetrievalCandidate
 from rag.shared.logging_utils import log_phase
@@ -27,6 +29,7 @@ class QueryResponse:
 
 def build_query_service(config: QueryConfig | None = None) -> "QueryService":
     cfg = config or QueryConfig.from_env()
+    validate_query_embedding_model(cfg.paths.storage_dir, cfg.embedding.model)
     embedder = build_openai_compatible_embedder(
         api_key=cfg.embedding.api_key or "",
         base_url=cfg.embedding.base_url,
@@ -48,6 +51,18 @@ def build_query_service(config: QueryConfig | None = None) -> "QueryService":
         neighbor_radius=cfg.routes.neighbor_radius,
         center_top_k=cfg.routes.center_top_k,
         final_top_n=cfg.ranking.final_top_n,
+        dependency_enabled=cfg.dependency.enabled,
+        dependency_router=DependencyRecallRouter(
+            client=llm_client,
+            model=cfg.dependency.router_model,
+            llm_enabled=cfg.dependency.router_llm_enabled,
+        ),
+        dependency_seed_score_ratio=cfg.dependency.seed_score_ratio,
+        dependency_max_seeds=cfg.dependency.max_seeds,
+        dependency_min_confidence=cfg.dependency.min_confidence,
+        dependency_per_seed_limit=cfg.dependency.per_seed_limit,
+        dependency_total_limit=cfg.dependency.total_limit,
+        dependency_vector_enabled=cfg.dependency.vector_enabled,
     )
     answer_generator = AnswerGenerator(
         client=llm_client,

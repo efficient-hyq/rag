@@ -39,6 +39,21 @@ class RetrievalRewriteConfig:
 
 
 @dataclass(frozen=True)
+class DependencyRecallConfig:
+    """在线一层依赖扩展配置。"""
+
+    enabled: bool = True
+    router_llm_enabled: bool = True
+    router_model: str = "qwen3.6-plus"
+    seed_score_ratio: float = 0.7
+    max_seeds: int = 8
+    min_confidence: float = 0.7
+    per_seed_limit: int = 5
+    total_limit: int = 12
+    vector_enabled: bool = False
+
+
+@dataclass(frozen=True)
 class RetrievalRankingConfig:
     """在线重排配置。"""
 
@@ -67,6 +82,7 @@ class QueryConfig:
     embedding: EmbeddingConfig
     routes: RetrievalRouteConfig
     rewrite: RetrievalRewriteConfig
+    dependency: DependencyRecallConfig
     ranking: RetrievalRankingConfig
     answer: AnswerGenerationConfig
 
@@ -94,6 +110,17 @@ class QueryConfig:
                 enabled=get_bool_env("RAG_RETRIEVAL_REWRITE_ENABLED", True),
                 model=os.getenv("RAG_QUERY_REWRITE_MODEL", "qwen3.6-plus"),
                 limit=int(os.getenv("RAG_RETRIEVAL_REWRITE_LIMIT", "3")),
+            ),
+            dependency=DependencyRecallConfig(
+                enabled=get_bool_env("RAG_DEPENDENCY_RECALL_ENABLED", True),
+                router_llm_enabled=get_bool_env("RAG_DEPENDENCY_ROUTER_LLM_ENABLED", True),
+                router_model=os.getenv("RAG_DEPENDENCY_ROUTER_MODEL", "qwen3.6-plus"),
+                seed_score_ratio=float(os.getenv("RAG_DEPENDENCY_SEED_SCORE_RATIO", "0.7")),
+                max_seeds=int(os.getenv("RAG_DEPENDENCY_MAX_SEEDS", "8")),
+                min_confidence=float(os.getenv("RAG_DEPENDENCY_MIN_CONFIDENCE", "0.7")),
+                per_seed_limit=int(os.getenv("RAG_DEPENDENCY_PER_SEED_LIMIT", "5")),
+                total_limit=int(os.getenv("RAG_DEPENDENCY_TOTAL_LIMIT", "12")),
+                vector_enabled=get_bool_env("RAG_DEPENDENCY_VECTOR_ENABLED", False),
             ),
             ranking=RetrievalRankingConfig(
                 llm_enabled=get_bool_env("RAG_RERANK_LLM_ENABLED", True),

@@ -10,6 +10,14 @@ from typing import Any
 import chromadb
 
 from rag.retrieval.ranking import DualStageReranker, QueryRewriter, RuleBasedReranker
+from rag.retrieval.dependency_recall import (
+    DependencyGraphIndex,
+    DependencyRecallRouter,
+    assemble_dependency_context,
+    expand_dependency_candidates,
+    select_dependency_seeds,
+)
+from rag.indexing.publication import resolve_final_index
 from rag.retrieval.tokenization import tokenize_technical_text
 
 
@@ -48,6 +56,8 @@ class RetrievalCandidate:
     final_score: float = 0.0
     is_neighbor: bool = False
     center_node_id: str | None = None
+    is_dependency_evidence: bool = False
+    dependency_sources: list[dict[str, Any]] = field(default_factory=list)
 
 
 class MetadataIndex:
@@ -91,6 +101,41 @@ class MetadataIndex:
             if next_id is not None:
                 neighbor_ids.append(next_id)
         return neighbor_ids
+
+    def find_dependency_fallback(self, source_node_id: str, edge: dict[str, Any]) -> str | None:
+        """只在 source 所属文档内按关系依据兜底，topic 仅用于同分排序。"""
+        source = self.metadata_by_id.get(source_node_id, {})
+        doc_id = str(source.get("doc_id") or "")
+        if not doc_id:
+            return None
+        topic = str(edge.get("topic") or "").strip()
+        reason_terms = set(tokenize_technical_text(str(edge.get("reason") or "")))
+        ranked: list[tuple[float, str]] = []
+        for node_id, metadata in self.metadata_by_id.items():
+            if node_id == source_node_id or str(metadata.get("doc_id") or "") != doc_id:
+                continue
+            topics = metadata.get("dependency_topics")
+            if isinstance(topics, str):
+                try:
+                    topics = json.loads(topics)
+                except json.JSONDecodeError:
+                    topics = []
+            haystack = " ".join(
+                [
+                    str(metadata.get("summary") or ""),
+                    str(metadata.get("heading_path") or ""),
+                    " ".join(str(item) for item in metadata.get("keywords", []) if item),
+                    str(metadata.get("text") or ""),
+                ]
+            )
+            reason_overlap = len(reason_terms.intersection(tokenize_technical_text(haystack)))
+            if reason_overlap == 0:
+                continue
+            topic_match = isinstance(topics, list) and topic in topics
+            score = float(reason_overlap) + (0.1 if topic and topic_match else 0.0)
+            ranked.append((score, node_id))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return ranked[0][1] if ranked else None
 
 
 def aggregate_route_hits(
@@ -206,9 +251,17 @@ class HybridRetriever:
         neighbor_radius: int = 1,
         center_top_k: int = 5,
         final_top_n: int = 5,
+        dependency_enabled: bool = True,
+        dependency_router: DependencyRecallRouter | None = None,
+        dependency_seed_score_ratio: float = 0.7,
+        dependency_max_seeds: int = 8,
+        dependency_min_confidence: float = 0.7,
+        dependency_per_seed_limit: int = 5,
+        dependency_total_limit: int = 12,
+        dependency_vector_enabled: bool = False,
     ) -> None:
         self.embedder = embedder
-        self.storage_dir = Path(storage_dir)
+        self.storage_dir = resolve_final_index(storage_dir)
         self.chroma_dir = self.storage_dir / "chroma"
         self.content_top_k = content_top_k
         self.summary_top_k = summary_top_k
@@ -220,6 +273,14 @@ class HybridRetriever:
         self.neighbor_radius = neighbor_radius
         self.center_top_k = center_top_k
         self.final_top_n = final_top_n
+        self.dependency_enabled = dependency_enabled
+        self.dependency_router = dependency_router or DependencyRecallRouter(llm_enabled=False)
+        self.dependency_seed_score_ratio = dependency_seed_score_ratio
+        self.dependency_max_seeds = dependency_max_seeds
+        self.dependency_min_confidence = dependency_min_confidence
+        self.dependency_per_seed_limit = dependency_per_seed_limit
+        self.dependency_total_limit = dependency_total_limit
+        self.dependency_vector_enabled = dependency_vector_enabled
         self.query_rewriter = query_rewriter
         self.reranker = reranker or DualStageReranker(rule_reranker=RuleBasedReranker(), llm_enabled=False)
         self.rule_reranker = self.reranker.rule_reranker
@@ -229,6 +290,13 @@ class HybridRetriever:
         self.summary_collection = self.chroma_client.get_collection(name="summary_vec")
         self.metadata_index = MetadataIndex.from_file(self.storage_dir / "metadata.json")
         self.bm25_retriever = BM25KeywordRetriever(self.storage_dir / "bm25.pkl")
+        self.dependency_graph = DependencyGraphIndex.from_file(self.storage_dir / "dependency_cards.json")
+        self.dependency_collection = None
+        if self.dependency_vector_enabled:
+            try:
+                self.dependency_collection = self.chroma_client.get_collection(name="dependency_vec")
+            except Exception:
+                logging.getLogger("rag.retriever").warning("dependency_vec 不存在，依赖向量兜底关闭")
 
     def retrieve(self, query: str) -> RetrievalResult:
         """执行在线查询主流程：原始召回 -> 改写补召回 -> 粗排 -> 相邻扩展 -> 最终重排。"""
@@ -259,10 +327,48 @@ class HybridRetriever:
         candidates = aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
         logger.info("候选聚合完成 | 候选数=%s", len(candidates))
         coarse_ranked = self.rule_reranker.rerank(candidates)
+        decision = self.dependency_router.decide(query) if self.dependency_enabled else None
+        dependency_expansion = None
+        if decision and decision.need_dependency_recall:
+            seeds = select_dependency_seeds(
+                coarse_ranked,
+                self.dependency_seed_score_ratio,
+                self.dependency_max_seeds,
+            )
+            dependency_expansion = expand_dependency_candidates(
+                query,
+                coarse_ranked,
+                seeds,
+                self.dependency_graph,
+                self.metadata_index,
+                min_confidence=self.dependency_min_confidence,
+                per_seed_limit=self.dependency_per_seed_limit,
+                total_limit=self.dependency_total_limit,
+            )
+            candidates = dependency_expansion.candidates
+            logger.info(
+                "依赖扩展完成 | reason=%s | seed=%s | 新增=%s | 缺失=%s | 裁剪=%s",
+                decision.reason,
+                len(seeds),
+                dependency_expansion.added_count,
+                dependency_expansion.missing_count,
+                dependency_expansion.truncated_count,
+            )
+            for seed in dependency_expansion.seeds:
+                dependency_ids = dependency_expansion.dependency_by_source.get(seed.node_id, [])
+                logger.info(
+                    "依赖扩展明细 | seed_node_id=%s | dependency_node_ids=%s | count=%s",
+                    seed.node_id,
+                    dependency_ids,
+                    len(dependency_ids),
+                )
+        else:
+            candidates = coarse_ranked
+            logger.info("依赖扩展关闭 | reason=%s", decision.reason if decision else "配置关闭")
         if self.neighbor_enabled:
             candidates = expand_neighbor_candidates(
                 query,
-                coarse_ranked,
+                candidates,
                 self.metadata_index,
                 radius=self.neighbor_radius,
                 center_top_k=self.center_top_k,
@@ -270,8 +376,24 @@ class HybridRetriever:
             logger.info("邻居扩展完成 | 候选数=%s", len(candidates))
 
         final_ranked = self.reranker.rerank(query, candidates)
-        top_candidates = final_ranked[: self.final_top_n]
-        logger.info("重排完成 | 最终候选数=%s | top_n=%s", len(final_ranked), len(top_candidates))
+        if dependency_expansion is not None:
+            top_candidates = assemble_dependency_context(
+                dependency_expansion.seeds,
+                dependency_expansion.dependency_by_source,
+                final_ranked,
+                self.final_top_n,
+            )
+        else:
+            top_candidates = final_ranked[: self.final_top_n]
+        regular_top_n = min(max(self.final_top_n, 0), len(final_ranked))
+        forced_dependency_count = len(top_candidates) - regular_top_n
+        logger.info(
+            "重排完成 | 最终候选数=%s | 常规TopN=%s | 强制依赖数=%s | 上下文候选数=%s",
+            len(final_ranked),
+            regular_top_n,
+            forced_dependency_count,
+            len(top_candidates),
+        )
         return RetrievalResult(
             query=query,
             rewritten_queries=rewritten_queries,
@@ -300,6 +422,17 @@ class HybridRetriever:
                 is_rewritten=is_rewritten,
             )
         )
+        if self.dependency_collection is not None:
+            hits.extend(
+                self._query_vector_route(
+                    collection=self.dependency_collection,
+                    route="dependency_vec",
+                    query=query,
+                    query_embedding=query_embedding,
+                    top_k=min(content_top_k or self.content_top_k, 4),
+                    is_rewritten=is_rewritten,
+                )
+            )
         hits.extend(
             self._query_vector_route(
                 collection=self.summary_collection,

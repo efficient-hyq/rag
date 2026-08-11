@@ -51,13 +51,13 @@ class AnswerGenerator:
                 chunk_index=str(candidate.metadata.get("chunk_index", "?")),
                 score=candidate.final_score,
             )
-            for candidate in candidates[: self.context_top_k]
+            for candidate in candidates
         ]
         if not references:
             return GeneratedAnswer(answer="根据现有文档无法回答。", references=[])
 
         if not self.enabled or self.client is None:
-            return self._build_fallback_answer(candidates[: self.context_top_k], references)
+            return self._build_fallback_answer(candidates, references)
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -73,14 +73,14 @@ class AnswerGenerator:
                 },
                 {
                     "role": "user",
-                    "content": self._build_user_prompt(question, candidates[: self.context_top_k]),
+                    "content": self._build_user_prompt(question, candidates),
                 },
             ],
             temperature=0.3,
         )
         answer = (response.choices[0].message.content or "").strip()
         if not answer:
-            return self._build_fallback_answer(candidates[: self.context_top_k], references)
+            return self._build_fallback_answer(candidates, references)
         return GeneratedAnswer(answer=answer, references=references)
 
     def _build_user_prompt(self, question: str, candidates: list[RetrievalCandidate]) -> str:
@@ -89,8 +89,17 @@ class AnswerGenerator:
             file_name = str(candidate.metadata.get("file_name") or candidate.metadata.get("doc_id") or "unknown")
             chunk_index = candidate.metadata.get("chunk_index", "?")
             text = candidate.text.strip()[: self.max_context_chars]
+            relation = "普通召回"
+            if candidate.is_dependency_evidence and candidate.dependency_sources:
+                topics = [
+                    str(item.get("topic") or "")
+                    for item in candidate.dependency_sources
+                ]
+                topic_text = "、".join(dict.fromkeys(item for item in topics if item))
+                relation = f"依赖证据：{topic_text}" if topic_text else "依赖证据"
             contexts.append(
-                f"[来源 {index}] file={file_name} | chunk={chunk_index} | node_id={candidate.node_id}\n{text}"
+                f"[来源 {index}][{relation}] file={file_name} | chunk={chunk_index} | "
+                f"node_id={candidate.node_id}\n{text}"
             )
         payload = {
             "question": question,

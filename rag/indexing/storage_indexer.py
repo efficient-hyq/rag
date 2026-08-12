@@ -83,7 +83,6 @@ class MultiRouteIndexer:
         self.chroma_dir = self.storage_dir / "chroma"
         self.bm25_path = self.storage_dir / "bm25.pkl"
         self.metadata_path = self.storage_dir / "metadata.json"
-        self.metadata_docs_dir = self.storage_dir / "metadata_docs"
         self.chroma_client = chroma_client
         self.tokenizer = tokenizer or tokenize_technical_text
 
@@ -123,9 +122,8 @@ class MultiRouteIndexer:
         )
         logger.info("向量库写入完成 | collection=content_vec,summary_vec | chunk数=%s", len(nodes))
 
-        self.write_metadata_shards(normalized_nodes, root_doc_dir or self.storage_dir)
-        self.rebuild_metadata_snapshot()
-        self.rebuild_bm25_from_metadata_snapshot()
+        self._write_metadata(normalized_nodes)
+        self._write_bm25(normalized_nodes)
         logger.info("索引文件写入完成 | bm25=%s | metadata=%s", self.bm25_path, self.metadata_path)
         return IndexResult(
             node_count=len(nodes),
@@ -165,65 +163,6 @@ class MultiRouteIndexer:
             documents=[str(record.get("text") or "") for record in records],
             metadatas=metadatas,
         )
-
-    def write_metadata_shards(self, nodes: list[Any], root_doc_dir: str | Path) -> None:
-        groups: dict[str, dict[str, dict[str, Any]]] = {}
-        for node in nodes:
-            normalized = normalize_node(node)
-            doc_key = doc_key_from_metadata(normalized["metadata"], Path(root_doc_dir))
-            record = {"text": normalized["text"]}
-            record.update(normalized["metadata"])
-            groups.setdefault(doc_key, {})[normalized["node_id"]] = record
-
-        self.metadata_docs_dir.mkdir(parents=True, exist_ok=True)
-        for doc_key, metadata in groups.items():
-            shard_path = self.metadata_docs_dir / shard_file_name(doc_key)
-            shard_path.write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-    def remove_metadata_shard(self, doc_key: str) -> None:
-        shard_path = self.metadata_docs_dir / shard_file_name(doc_key)
-        if shard_path.exists():
-            shard_path.unlink()
-
-    def rebuild_metadata_snapshot(self) -> dict[str, dict[str, Any]]:
-        merged: dict[str, dict[str, Any]] = {}
-        self.metadata_docs_dir.mkdir(parents=True, exist_ok=True)
-        for shard_path in sorted(self.metadata_docs_dir.glob("*.json")):
-            payload = json.loads(shard_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                merged.update(
-                    {
-                        str(node_id): dict(metadata)
-                        for node_id, metadata in payload.items()
-                        if isinstance(metadata, dict)
-                    }
-                )
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_path.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return merged
-
-    def rebuild_bm25_from_metadata_snapshot(self) -> None:
-        if self.metadata_path.exists():
-            metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-        else:
-            metadata = {}
-        nodes = [
-            {
-                "node_id": str(node_id),
-                "text": str(item.get("text") or ""),
-                "summary": str(item.get("summary") or ""),
-                "metadata": dict(item),
-            }
-            for node_id, item in metadata.items()
-            if isinstance(item, dict)
-        ]
-        self._write_bm25(nodes)
 
     def _collection(self, name: str) -> Any:
         client = self.chroma_client or self._build_chroma_client()

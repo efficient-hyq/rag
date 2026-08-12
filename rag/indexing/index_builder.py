@@ -24,11 +24,11 @@ from rag.indexing.embedding_client import (
     embed_texts,
 )
 from rag.indexing.markdown_chunker import split_documents
+from rag.indexing.preview_renderer import write_document_chunk_previews
 from rag.indexing.publication import (
     prepare_index_workspace,
     publish_index,
 )
-from rag.indexing.preview_renderer import write_document_chunk_previews
 from rag.indexing.rebuild_decision import IndexingContext, compute_rebuild_decision
 from rag.indexing.semantic_annotator import SemanticAnnotator
 from rag.indexing.storage_indexer import IndexResult, MultiRouteIndexer, doc_key_from_metadata
@@ -150,15 +150,11 @@ def build_offline_index(
             writer.delete_nodes(stale_node_ids)
             if cfg.dependency.vector_enabled:
                 writer.delete_dependency_nodes(stale_node_ids)
-    for doc_key in stale_doc_keys:
-        writer.remove_metadata_shard(doc_key)
 
     # 6. 无需重建的情况
     if decision.needs_no_rebuild:
         manifest = build_manifest(ctx, docs_root, storage_root)
         checkpoint.write_manifest(manifest)
-        writer.rebuild_metadata_snapshot()
-        writer.rebuild_bm25_from_metadata_snapshot()
         next_state = build_next_document_state(
             previous_state,
             current_hashes,

@@ -23,7 +23,6 @@ WORKSPACE_ARTIFACTS = (
     "chroma",
     "bm25.pkl",
     "metadata.json",
-    "metadata_docs",
     "checkpoints",
     "chunk_previews",
     "dependency_cards.json",

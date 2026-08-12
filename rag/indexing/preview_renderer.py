@@ -157,11 +157,19 @@ def _render_preview_html(groups: dict[str, list[Any]]) -> str:
 
 
 def _safe_doc_file_name(doc_id: str) -> str:
-    stem = re.sub(r"[^0-9A-Za-z._-]+", "_", doc_id.replace("\\", "/").replace("/", "__")).strip("_")
+    """将 doc_id 转换为安全的文件名，保留原始名称结构"""
+    # 移除路径分隔符，保留文件名主体
+    stem = doc_id.replace("\\", "/").split("/")[-1]
+    # 移除 .md 后缀（如果存在）
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    # 替换不安全字符为下划线
+    stem = re.sub(r"[^0-9A-Za-z一-龥._-]+", "_", stem).strip("_")
     if not stem:
         stem = "unknown"
-    suffix = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()[:12]
-    return f"{stem[:80]}-{suffix}"
+    # 限制长度并添加哈希后缀避免冲突
+    suffix = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()[:8]
+    return f"{stem[:60]}-{suffix}"
 
 
 def _render_node(node: Any) -> str:

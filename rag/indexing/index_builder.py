@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import replace
 from datetime import datetime
@@ -9,16 +8,12 @@ from typing import Any
 
 from rag.config import BuildIndexConfig
 from rag.indexing.document_loader import (
-    MarkdownDocumentDiff,
     collect_current_markdown_files,
-    collect_current_markdown_state,
     compute_document_content_hash,
-    diff_markdown_documents,
     load_documents_from_files,
     normalize_doc_key,
 )
 from rag.indexing.dependency_graph import (
-    DEPENDENCY_SCHEMA_VERSION,
     DependencyCardStore,
     DocumentDependencyAggregator,
     build_dependency_vector_records,
@@ -34,16 +29,11 @@ from rag.indexing.publication import (
     publish_index,
 )
 from rag.indexing.preview_renderer import write_document_chunk_previews
+from rag.indexing.rebuild_decision import IndexingContext, compute_rebuild_decision
 from rag.indexing.semantic_annotator import SemanticAnnotator
-from rag.indexing.storage_indexer import IndexResult, MultiRouteIndexer
-from rag.shared.checkpoints import CheckpointStore
+from rag.indexing.storage_indexer import IndexResult, MultiRouteIndexer, doc_key_from_metadata
+from rag.shared.checkpoints import CheckpointStore, node_key, text_hash
 from rag.shared.logging_utils import log_phase
-
-
-def build_markdown_diff(docs_root: Path, checkpoint: CheckpointStore) -> MarkdownDocumentDiff:
-    previous_state = checkpoint.load_document_index_state()
-    current_hashes = collect_current_markdown_state(docs_root)
-    return diff_markdown_documents(previous_state, current_hashes)
 
 
 def build_offline_index(
@@ -97,51 +87,63 @@ def build_offline_index(
 
     checkpoint = CheckpointStore(storage_root)
     writer = indexer or MultiRouteIndexer(storage_root)
-    force_dependency_rebuild = False
-    force_semantic_rebuild = False
 
-    with log_phase(logger, "识别增量文档", docs_dir=str(docs_root)):
-        previous_state = checkpoint.load_document_index_state()
+    # 1. 收集当前文档状态
+    with log_phase(logger, "收集文档状态", docs_dir=str(docs_root)):
         current_files = collect_current_markdown_files(docs_root)
         current_hashes = {
             doc_key: compute_document_content_hash(path)
             for doc_key, path in current_files.items()
         }
-        diff = diff_markdown_documents(previous_state, current_hashes)
-        force_semantic_rebuild = prompt_versions_need_full_rebuild(
-            previous_state,
-            cfg.annotation.prompt_version,
-            cfg.dependency.prompt_version,
-        )
-        force_dependency_rebuild = bool(
-            _managed_workspace
-            and dependency_cards_need_full_rebuild(storage_root, current_hashes)
-        )
-        if force_semantic_rebuild or force_dependency_rebuild:
-            diff = MarkdownDocumentDiff(
-                added=set(diff.added),
-                changed=set(diff.changed) | set(diff.unchanged),
-                deleted=set(diff.deleted),
-                unchanged=set(),
-            )
-    if force_semantic_rebuild:
-        logger.info(
-            "标注或依赖图 prompt 版本变化，强制重建全部文档 | annotation=%s | dependency=%s",
-            cfg.annotation.prompt_version,
-            cfg.dependency.prompt_version,
-        )
-    logger.info(
-        "增量识别完成 | 新增=%s | 变更=%s | 删除=%s | 复用=%s",
-        len(diff.added),
-        len(diff.changed),
-        len(diff.deleted),
-        len(diff.unchanged),
+
+    # 2. 加载历史状态
+    previous_state = checkpoint.load_document_index_state()
+
+    # 3. 构建索引上下文
+    annotation_prompt = (
+        cfg.annotation.prompt_path.read_text(encoding="utf-8")
+        if cfg.annotation.prompt_path.exists()
+        else ""
+    )
+    dependency_prompt = (
+        cfg.dependency.prompt_path.read_text(encoding="utf-8")
+        if cfg.dependency.prompt_path.exists()
+        else ""
     )
 
-    stale_doc_keys = diff.changed | diff.deleted
-    dependency_removed_doc_keys = set(stale_doc_keys)
-    if force_dependency_rebuild:
-        dependency_removed_doc_keys.update(load_dependency_card_doc_keys(storage_root))
+    ctx = IndexingContext(
+        current_doc_hashes=current_hashes,
+        docs_root=docs_root,
+        storage_root=storage_root,
+        chunk_size=cfg.chunking.chunk_size,
+        chunk_overlap=cfg.chunking.chunk_overlap,
+        annotation_prompt=annotation_prompt,
+        annotation_prompt_version=cfg.annotation.prompt_version,
+        dependency_prompt=dependency_prompt,
+        dependency_prompt_version=cfg.dependency.prompt_version,
+        embedding_model=cfg.embedding.model,
+        annotator_model=cfg.annotation.model,
+        dependency_vector_enabled=cfg.dependency.vector_enabled,
+        previous_state=previous_state,
+        is_managed_workspace=_managed_workspace,
+    )
+
+    # 4. 计算重建决策
+    decision = compute_rebuild_decision(ctx)
+
+    logger.info(
+        "重建决策 | 变更=%d | 删除=%d | 不变=%d | 重标注=%d | 重依赖=%d | 重向量=%d",
+        len(decision.changed_docs),
+        len(decision.deleted_docs),
+        len(decision.unchanged_docs),
+        len(decision.need_reannotate),
+        len(decision.need_redependency),
+        len(decision.need_reembed),
+    )
+    logger.info("决策原因: %s", decision.reason)
+
+    # 5. 清理旧数据
+    stale_doc_keys = decision.changed_docs | decision.deleted_docs
     stale_node_ids = gather_stale_node_ids(previous_state, stale_doc_keys)
     if stale_node_ids:
         with log_phase(logger, "清理旧索引", node_count=len(stale_node_ids)):
@@ -151,24 +153,25 @@ def build_offline_index(
     for doc_key in stale_doc_keys:
         writer.remove_metadata_shard(doc_key)
 
-    rebuild_keys = sorted(diff.added | diff.changed)
-    if not rebuild_keys:
+    # 6. 无需重建的情况
+    if decision.needs_no_rebuild:
+        manifest = build_manifest(ctx, docs_root, storage_root)
+        checkpoint.write_manifest(manifest)
         writer.rebuild_metadata_snapshot()
         writer.rebuild_bm25_from_metadata_snapshot()
         next_state = build_next_document_state(
             previous_state,
             current_hashes,
-            diff.unchanged,
+            decision.unchanged_docs,
             [],
             docs_root,
-            annotation_prompt_version=cfg.annotation.prompt_version,
-            dependency_prompt_version=cfg.dependency.prompt_version,
+            ctx,
         )
         checkpoint.save_document_index_state(next_state)
-        DependencyCardStore(storage_root).update_documents({}, dependency_removed_doc_keys)
+        DependencyCardStore(storage_root).update_documents({}, decision.deleted_docs)
         checkpoint.remove_node_records(stale_node_ids - document_state_node_ids(next_state))
-        checkpoint.remove_dependency_documents(diff.deleted)
-        logger.info("离线索引完成 | 本次无新增或变更文档，已刷新兼容索引快照")
+        checkpoint.remove_dependency_documents(decision.deleted_docs)
+        logger.info("离线索引完成 | 本次无需重建，已刷新兼容索引快照")
         return IndexResult(
             node_count=0,
             content_collection="content_vec",
@@ -177,12 +180,87 @@ def build_offline_index(
             metadata_path=writer.metadata_path,
         )
 
+    # 7. 仅依赖分析变化：加载已有 nodes，跳过标注和向量化
+    if decision.needs_dependency_only:
+        logger.info("仅需重新分析依赖 | 文档数=%d", len(decision.need_redependency))
+        nodes = _read_chunks_from_checkpoint(checkpoint)
+        if not nodes:
+            logger.warning("未找到已标注的 chunks，无法仅重跑依赖分析")
+            return IndexResult(
+                node_count=0,
+                content_collection="content_vec",
+                summary_collection="summary_vec",
+                bm25_path=writer.bm25_path,
+                metadata_path=writer.metadata_path,
+            )
+
+        # 清理依赖缓存
+        checkpoint.remove_dependency_documents(decision.need_redependency)
+
+        graph_aggregator = dependency_aggregator or DocumentDependencyAggregator(
+            api_key=cfg.llm.api_key or "",
+            base_url=cfg.llm.base_url,
+            model=cfg.dependency.model,
+            prompt=dependency_prompt,
+            prompt_version=cfg.dependency.prompt_version,
+        )
+        with log_phase(logger, "文档依赖聚合（仅依赖分析）", docs=len(decision.need_redependency), nodes=len(nodes)):
+            if dependency_aggregator is None:
+                dependency_result = graph_aggregator.aggregate_documents(
+                    nodes,
+                    current_hashes,
+                    docs_root,
+                    checkpoint=checkpoint,
+                )
+            else:
+                dependency_result = graph_aggregator.aggregate_documents(
+                    nodes,
+                    current_hashes,
+                    docs_root,
+                )
+
+        DependencyCardStore(storage_root).update_documents(
+            dependency_result.documents,
+            set(),
+        )
+        if dependency_result.failed_docs:
+            raise RuntimeError(
+                "依赖图聚合存在未成功文档: " + ", ".join(dependency_result.failed_docs)
+            )
+
+        manifest = build_manifest(ctx, docs_root, storage_root)
+        checkpoint.write_manifest(manifest)
+        next_state = build_next_document_state(
+            previous_state,
+            current_hashes,
+            decision.unchanged_docs,
+            [],
+            docs_root,
+            ctx,
+        )
+        checkpoint.save_document_index_state(next_state)
+
+        logger.info("依赖分析完成 | 文档数=%s", len(dependency_result.documents))
+        return IndexResult(
+            node_count=len(nodes),
+            content_collection="content_vec",
+            summary_collection="summary_vec",
+            bm25_path=writer.bm25_path,
+            metadata_path=writer.metadata_path,
+        )
+
+    # 8. 需要重新标注：完整流程
+    rebuild_keys = sorted(decision.need_reannotate)
     rebuild_files = [current_files[key] for key in rebuild_keys]
-    with log_phase(logger, "加载增量文档", docs=len(rebuild_files)):
+
+    # 先清理依赖缓存（依赖 key 基于 doc_key，不依赖 chunks）
+    checkpoint.remove_dependency_documents(decision.need_redependency)
+
+    with log_phase(logger, "加载文档", docs=len(rebuild_files)):
         documents = load_documents_from_files(rebuild_files, docs_root)
     if not documents:
-        raise RuntimeError("存在新增或变更 Markdown 文档，但未加载到可重建文档")
-    logger.info("增量文档加载完成 | 文档数=%s", len(documents))
+        raise RuntimeError("存在需要重建的文档，但未加载到任何文档")
+    logger.info("文档加载完成 | 文档数=%s", len(documents))
 
     with log_phase(
         logger,
@@ -193,19 +271,11 @@ def build_offline_index(
         nodes = split_documents(documents, cfg.chunking.chunk_size, cfg.chunking.chunk_overlap)
     logger.info("切分完成 | chunk数=%s", len(nodes))
 
-    checkpoint.write_manifest(
-        {
-            "docs_dir": str(docs_root),
-            "storage_dir": str(storage_root),
-            "chunk_size": cfg.chunking.chunk_size,
-            "chunk_overlap": cfg.chunking.chunk_overlap,
-            "annotator_model": cfg.annotation.model,
-            "annotation_prompt_version": cfg.annotation.prompt_version,
-            "dependency_prompt_version": cfg.dependency.prompt_version,
-            "annotation_checkpoint_enabled": annotator is None,
-            "embedding_model": cfg.embedding.model,
-        }
-    )
+    # 切分后再清理标注缓存（基于新生成的 node_id）
+    checkpoint.remove_annotation_by_node_ids({node_key(node) for node in nodes})
+
+    manifest = build_manifest(ctx, docs_root, storage_root)
+    checkpoint.write_manifest(manifest)
     checkpoint.write_chunks(nodes)
     write_document_chunk_previews(nodes, storage_root)
 
@@ -214,9 +284,7 @@ def build_offline_index(
         base_url=cfg.llm.base_url,
         model=cfg.annotation.model,
         max_workers=cfg.annotation.workers,
-        prompt=cfg.annotation.prompt_path.read_text(encoding="utf-8")
-        if cfg.annotation.prompt_path.exists()
-        else None,
+        prompt=annotation_prompt,
         prompt_version=cfg.annotation.prompt_version,
     )
     with log_phase(logger, "语义标注", nodes=len(nodes), checkpoint_enabled=annotator is None):
@@ -237,9 +305,7 @@ def build_offline_index(
         api_key=cfg.llm.api_key or "",
         base_url=cfg.llm.base_url,
         model=cfg.dependency.model,
-        prompt=cfg.dependency.prompt_path.read_text(encoding="utf-8")
-        if cfg.dependency.prompt_path.exists()
-        else None,
+        prompt=dependency_prompt,
         prompt_version=cfg.dependency.prompt_version,
     )
     with log_phase(logger, "文档依赖聚合", docs=len(rebuild_keys), nodes=len(nodes)):
@@ -258,7 +324,7 @@ def build_offline_index(
             )
     DependencyCardStore(storage_root).update_documents(
         dependency_result.documents,
-        dependency_removed_doc_keys,
+        decision.deleted_docs,
     )
     if dependency_result.failed_docs:
         raise RuntimeError(
@@ -336,15 +402,14 @@ def build_offline_index(
     next_state = build_next_document_state(
         previous_state,
         current_hashes,
-        diff.unchanged,
+        decision.unchanged_docs,
         nodes,
         docs_root,
-        annotation_prompt_version=cfg.annotation.prompt_version,
-        dependency_prompt_version=cfg.dependency.prompt_version,
+        ctx,
     )
     checkpoint.save_document_index_state(next_state)
     checkpoint.remove_node_records(stale_node_ids - document_state_node_ids(next_state))
-    checkpoint.remove_dependency_documents(diff.deleted)
+    checkpoint.remove_dependency_documents(decision.deleted_docs)
     logger.info(
         "离线索引完成 | chunk数=%s | metadata=%s | bm25=%s",
         result.node_count,
@@ -352,6 +417,22 @@ def build_offline_index(
         result.bm25_path,
     )
     return result
+
+
+def _read_chunks_from_checkpoint(checkpoint: CheckpointStore) -> list[Any]:
+    """从检查点重建 node 对象列表。"""
+    from llama_index.core.schema import TextNode
+
+    records = checkpoint.load_chunk_records()
+    nodes: list[Any] = []
+    for record in records.values():
+        node = TextNode(
+            id_=record.get("node_id", ""),
+            text=record.get("text", ""),
+            metadata=record.get("metadata", {}),
+        )
+        nodes.append(node)
+    return nodes
 
 
 def gather_stale_node_ids(previous_state: dict[str, Any], doc_keys: set[str]) -> set[str]:
@@ -373,9 +454,9 @@ def build_next_document_state(
     unchanged_keys: set[str],
     rebuilt_nodes: list[Any],
     docs_root: Path,
-    annotation_prompt_version: str = "",
-    dependency_prompt_version: str = "",
+    ctx: IndexingContext,
 ) -> dict[str, Any]:
+    """构建下次索引的文档状态快照。"""
     previous_docs = previous_state.get("docs", {})
     if not isinstance(previous_docs, dict):
         previous_docs = {}
@@ -393,55 +474,26 @@ def build_next_document_state(
         docs[doc_key] = {
             "content_hash": current_hashes[doc_key],
             "node_ids": rebuilt_node_ids.get(doc_key, []),
+            "node_count": len(rebuilt_node_ids.get(doc_key, [])),
             "updated_at": updated_at,
         }
+
+    annotation_prompt_hash = text_hash(ctx.annotation_prompt) if ctx.annotation_prompt else ""
+    dependency_prompt_hash = text_hash(ctx.dependency_prompt) if ctx.dependency_prompt else ""
+
     return {
-        "annotation_prompt_version": annotation_prompt_version,
-        "dependency_prompt_version": dependency_prompt_version,
+        "schema_version": "v1",
+        "chunk_size": ctx.chunk_size,
+        "chunk_overlap": ctx.chunk_overlap,
+        "annotation_prompt_version": ctx.annotation_prompt_version,
+        "annotation_prompt_hash": annotation_prompt_hash,
+        "dependency_prompt_version": ctx.dependency_prompt_version,
+        "dependency_prompt_hash": dependency_prompt_hash,
+        "embedding_model": ctx.embedding_model,
+        "total_docs": len(docs),
+        "total_nodes": sum(len(record.get("node_ids", [])) for record in docs.values()),
         "docs": docs,
     }
-
-
-def prompt_versions_need_full_rebuild(
-    previous_state: dict[str, Any],
-    annotation_prompt_version: str,
-    dependency_prompt_version: str,
-) -> bool:
-    """输出协议变化时全量重建；自由 topic 本身不参与版本失效。"""
-    previous_docs = previous_state.get("docs")
-    if not isinstance(previous_docs, dict) or not previous_docs:
-        return False
-    return (
-        previous_state.get("annotation_prompt_version") != annotation_prompt_version
-        or previous_state.get("dependency_prompt_version") != dependency_prompt_version
-    )
-
-
-def dependency_cards_need_full_rebuild(
-    storage_root: Path,
-    current_hashes: dict[str, str],
-) -> bool:
-    path = storage_root / "dependency_cards.json"
-    if not path.exists():
-        return bool(current_hashes)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return True
-    if not isinstance(payload, dict):
-        return True
-    documents = payload.get("documents")
-    if payload.get("schema_version") != DEPENDENCY_SCHEMA_VERSION or not isinstance(documents, dict):
-        return True
-    for doc_key, content_hash in current_hashes.items():
-        card = documents.get(doc_key)
-        if (
-            not isinstance(card, dict)
-            or card.get("status") != "success"
-            or card.get("doc_content_hash") != content_hash
-        ):
-            return True
-    return False
 
 
 def document_state_node_ids(state: dict[str, Any]) -> set[str]:
@@ -457,40 +509,30 @@ def document_state_node_ids(state: dict[str, Any]) -> set[str]:
     }
 
 
-def load_dependency_card_doc_keys(storage_root: Path) -> set[str]:
-    path = storage_root / "dependency_cards.json"
-    if not path.exists():
-        return set()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    documents = payload.get("documents") if isinstance(payload, dict) else None
-    return {str(key) for key in documents} if isinstance(documents, dict) else set()
-
-
 def group_node_ids_by_doc_key(nodes: list[Any], docs_root: Path) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {}
     for node in nodes:
         metadata = dict(getattr(node, "metadata", {}) or {})
-        doc_key = doc_key_from_node_metadata(metadata, docs_root)
+        doc_key = doc_key_from_metadata(metadata, docs_root)
         node_id = str(getattr(node, "node_id", None) or getattr(node, "id_", None) or "")
         if doc_key and node_id:
             groups.setdefault(doc_key, []).append(node_id)
     return groups
 
 
-def doc_key_from_node_metadata(metadata: dict[str, Any], docs_root: Path) -> str:
-    for key in ("cleaned_markdown_relative_path", "doc_id", "file_path", "filename"):
-        value = metadata.get(key)
-        if not value:
-            continue
-        raw_path = str(value).replace("\\", "/").strip()
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        try:
-            return normalize_doc_key(path, docs_root)
-        except ValueError:
-            return path.as_posix().lower()
-    return "unknown"
+def build_manifest(ctx: IndexingContext, docs_root: Path, storage_root: Path) -> dict[str, Any]:
+    """构建 manifest.json 配置清单。"""
+    return {
+        "docs_dir": str(docs_root),
+        "storage_dir": str(storage_root),
+        "chunk_size": ctx.chunk_size,
+        "chunk_overlap": ctx.chunk_overlap,
+        "annotator_model": ctx.annotator_model,
+        "annotation_prompt_version": ctx.annotation_prompt_version,
+        "annotation_prompt_hash": text_hash(ctx.annotation_prompt) if ctx.annotation_prompt else "",
+        "dependency_prompt_version": ctx.dependency_prompt_version,
+        "dependency_prompt_hash": text_hash(ctx.dependency_prompt) if ctx.dependency_prompt else "",
+        "embedding_model": ctx.embedding_model,
+        "dependency_vector_enabled": ctx.dependency_vector_enabled,
+    }
+

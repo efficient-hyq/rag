@@ -12,7 +12,7 @@ from typing import Any
 from openai import OpenAI
 
 from rag.indexing.dependency_topics import normalize_dependency_topics
-from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress
+from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress, text_hash
 
 
 EMPTY_ANNOTATION = {
@@ -58,6 +58,7 @@ class SemanticAnnotator:
         self.client = client or OpenAI(api_key=api_key, base_url=base_url)
         self.prompt = prompt or load_annotation_prompt()
         self.prompt_version = prompt_version
+        self.prompt_hash = text_hash(self.prompt)
 
     def annotate_nodes(
         self,
@@ -103,9 +104,7 @@ class SemanticAnnotator:
 
                 self._apply_annotation(node, annotation)
                 if checkpoint:
-                    checkpoint.append_annotation(
-                        key, annotation, status=status, error=error, model=self.model
-                    )
+                    checkpoint.append_annotation(key, annotation, status=status, error=error)
                 completed += 1
                 if show_progress:
                     print_progress(ProgressSnapshot("标注", len(nodes), completed, failed))
@@ -136,7 +135,7 @@ class SemanticAnnotator:
         return dict(EMPTY_ANNOTATION)
 
     def _cache_key(self, node: Any) -> str:
-        return f"{node_key(node)}|annotation|{self.prompt_version}"
+        return f"{node_key(node)}|annotation|{self.prompt_version}|{self.prompt_hash}"
 
     @staticmethod
     def _apply_annotation(node: Any, annotation: dict[str, Any]) -> None:

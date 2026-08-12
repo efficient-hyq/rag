@@ -68,15 +68,15 @@ class BuildIndexConfig:
                 chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", "100")),
             ),
             annotation=AnnotationConfig(
-                model=os.getenv("RAG_ANNOTATOR_MODEL", "qwen3.6-plus"),
+                model=os.getenv("RAG_ANNOTATOR_MODEL"),
                 workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "5")),
                 prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v4.md")),
                 prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v4"),
             ),
             dependency=DependencyGraphConfig(
                 model=os.getenv("RAG_DEPENDENCY_GRAPH_MODEL", "qwen3.6-plus"),
-                prompt_path=Path(os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_PATH", "prompts/dependency_graph_v3.md")),
-                prompt_version=os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_VERSION","dependency_graph_v3",),
+                prompt_path=Path(os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_PATH", "prompts/dependency_graph_v4.md")),
+                prompt_version=os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_VERSION","dependency_graph_v4",),
                 vector_enabled=get_bool_env("RAG_DEPENDENCY_VECTOR_ENABLED", False),
             ),
         )

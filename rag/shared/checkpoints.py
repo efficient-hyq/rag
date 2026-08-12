@@ -102,14 +102,11 @@ class CheckpointStore:
         self._rewrite_jsonl_without_node_keys(self.content_embeddings_path, node_ids)
         self._rewrite_jsonl_without_node_keys(self.summary_embeddings_path, node_ids)
 
-    def load_raw_records(self, path: Path) -> dict[str, dict[str, Any]]:
-        return self._load_jsonl_by_key(path)
-
     def load_annotations(self) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         for key, record in self._load_jsonl_by_key(self.annotations_path).items():
             if record.get("status") == "success":
-                result[_annotation_cache_identity(key)] = dict(record.get("annotation") or {})
+                result[key] = dict(record.get("annotation") or {})
         return result
 
     def append_annotation(
@@ -118,7 +115,6 @@ class CheckpointStore:
         annotation: dict[str, Any],
         status: str = "success",
         error: str | None = None,
-        model: str | None = None,
     ) -> None:
         self._upsert_jsonl(
             self.annotations_path,
@@ -126,7 +122,6 @@ class CheckpointStore:
                 "key": key,
                 "status": status,
                 "annotation": annotation,
-                "model": model or _model_from_annotation_key(key),
                 "error": error,
             },
         )
@@ -135,10 +130,7 @@ class CheckpointStore:
         result: dict[str, dict[str, Any]] = {}
         for key, record in self._load_jsonl_by_key(self.dependency_cards_path).items():
             if record.get("status") == "success":
-                card = dict(record.get("card") or {})
-                if record.get("model") and not card.get("model"):
-                    card["model"] = record["model"]
-                result[_dependency_cache_identity(key)] = card
+                result[key] = dict(record.get("card") or {})
         return result
 
     def append_dependency_card(self, key: str, card: dict[str, Any]) -> None:
@@ -147,47 +139,52 @@ class CheckpointStore:
             {
                 "key": key,
                 "status": str(card.get("status") or "failed"),
-                "model": card.get("model"),
                 "card": card,
             },
         )
 
-    def migrate_model_agnostic_records(self) -> dict[str, int]:
-        """将旧版带模型 key 的成功 LLM 检查点原地转换为稳定 key。"""
-        annotation_count = self._migrate_jsonl_keys(self.annotations_path, _annotation_cache_identity)
-        dependency_count = self._migrate_jsonl_keys(self.dependency_cards_path, _dependency_cache_identity)
-        return {"annotations": annotation_count, "dependency_cards": dependency_count}
+    def remove_annotation_document(self, doc_key: str) -> None:
+        """删除指定文档的所有标注缓存记录。
 
-    def _migrate_jsonl_keys(self, path: Path, identity_fn: Any) -> int:
-        records = self._load_jsonl_by_key(path)
-        migrated = 0
-        changed = False
-        normalized: dict[str, dict[str, Any]] = {}
-        for key, record in records.items():
-            new_key = identity_fn(key)
-            if new_key != key:
-                migrated += 1
-                changed = True
-            record["key"] = new_key
-            if path == self.annotations_path:
-                if not record.get("model") and _model_from_annotation_key(key):
-                    record["model"] = _model_from_annotation_key(key)
-                    changed = True
-            elif path == self.dependency_cards_path and not record.get("model"):
-                card = record.get("card") if isinstance(record.get("card"), dict) else {}
-                model = card.get("model") or _model_from_dependency_key(key)
-                if model:
-                    record["model"] = model
-                    changed = True
-            current = normalized.get(new_key)
-            if current and current.get("status") == "success" and record.get("status") != "success":
-                continue
-            normalized[new_key] = record
-        if changed:
-            with path.open("w", encoding="utf-8") as file:
-                for record in normalized.values():
-                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return migrated
+        标注 key 格式: {node_id}|annotation|{prompt_version}|{prompt_hash}
+        其中 node_id 是哈希值，需要通过 chunks.jsonl 中的 metadata 匹配。
+        """
+        if not doc_key:
+            return
+
+        # 1. 从 chunks 中找到属于该文档的所有 node_id
+        chunk_records = self.load_chunk_records()
+        target_node_ids = {
+            node_id
+            for node_id, record in chunk_records.items()
+            if record.get("metadata", {}).get("doc_id") == doc_key
+        }
+
+        if not target_node_ids:
+            return
+
+        # 2. 删除这些 node_id 对应的标注记录
+        self.remove_annotation_by_node_ids(target_node_ids)
+
+    def remove_annotation_by_node_ids(self, node_ids: set[str]) -> None:
+        """根据 node_id 集合删除对应的标注缓存记录。
+
+        标注 key 格式: {node_id}|annotation|{prompt_version}|{prompt_hash}
+        """
+        if not node_ids:
+            return
+
+        all_annotations = self._load_jsonl_by_key(self.annotations_path)
+        kept_records = {
+            key: record
+            for key, record in all_annotations.items()
+            if not any(key.startswith(f"{node_id}|") for node_id in node_ids)
+        }
+
+        self.annotations_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.annotations_path.open("w", encoding="utf-8") as file:
+            for record in kept_records.values():
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def remove_dependency_documents(self, doc_keys: set[str]) -> None:
         if not doc_keys:
@@ -301,30 +298,6 @@ def stable_chunk_id(doc_id: str, chunk_index: int, text: str) -> str:
 def _checkpoint_key_matches_node(key: str, node_ids: set[str]) -> bool:
     node_id = key.split("|", 1)[0]
     return node_id in node_ids
-
-
-def _annotation_cache_identity(key: str) -> str:
-    parts = key.split("|")
-    if len(parts) >= 4 and parts[1] == "annotation":
-        return "|".join((parts[0], parts[1], parts[-1]))
-    return key
-
-
-def _dependency_cache_identity(key: str) -> str:
-    parts = key.split("|")
-    if len(parts) >= 4:
-        return "|".join((parts[0], parts[1], parts[-1]))
-    return key
-
-
-def _model_from_annotation_key(key: str) -> str | None:
-    parts = key.split("|")
-    return parts[2] if len(parts) >= 4 and parts[1] == "annotation" else None
-
-
-def _model_from_dependency_key(key: str) -> str | None:
-    parts = key.split("|")
-    return parts[-2] if len(parts) >= 4 else None
 
 
 def print_progress(snapshot: ProgressSnapshot) -> None:

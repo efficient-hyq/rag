@@ -15,11 +15,11 @@ from openai import OpenAI
 
 from rag.indexing.dependency_topics import normalize_relation_edge
 from rag.indexing.storage_indexer import doc_key_from_metadata
-from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress
+from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress, text_hash
 
 
 DEPENDENCY_SCHEMA_VERSION = "dependency_graph_v4"
-DEFAULT_DEPENDENCY_PROMPT_VERSION = "dependency_graph_v3"
+DEFAULT_DEPENDENCY_PROMPT_VERSION = "dependency_graph_v4"
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,7 @@ class DocumentDependencyAggregator:
         self.client = client or OpenAI(api_key=api_key, base_url=base_url)
         self.prompt = prompt or load_dependency_prompt()
         self.prompt_version = prompt_version
+        self.prompt_hash = text_hash(self.prompt)
 
     def aggregate_documents(
         self,
@@ -155,7 +156,7 @@ class DocumentDependencyAggregator:
         )
 
     def _cache_key(self, doc_key: str, doc_hash: str) -> str:
-        return f"{doc_key}|{doc_hash}|{self.prompt_version}"
+        return f"{doc_key}|{doc_hash}|{self.prompt_version}|{self.prompt_hash}"
 
 
 class DependencyCardStore:
@@ -368,7 +369,7 @@ def parse_json_object(content: str) -> dict[str, Any]:
 
 
 def load_dependency_prompt(path: str | Path | None = None) -> str:
-    prompt_path = Path(path) if path is not None else Path("prompts/dependency_graph_v3.md")
+    prompt_path = Path(path) if path is not None else Path("prompts/dependency_graph_v4.md")
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8").strip()
     return DEFAULT_DEPENDENCY_PROMPT

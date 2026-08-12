@@ -47,9 +47,11 @@ class DependencyRecallConfig:
     router_model: str = "qwen3.6-plus"
     seed_score_ratio: float = 0.7
     max_seeds: int = 8
+    seed_capability_weight: float = 0.3
     min_confidence: float = 0.7
     per_seed_limit: int = 5
     total_limit: int = 12
+    max_forced_dependencies: int = 15
     vector_enabled: bool = False
 
 
@@ -60,7 +62,7 @@ class RetrievalRankingConfig:
     llm_enabled: bool = True
     llm_model: str = "qwen3.6-plus"
     llm_top_n: int = 10
-    final_top_n: int = 5
+    final_top_n: int = 8
 
 
 @dataclass(frozen=True)
@@ -115,18 +117,20 @@ class QueryConfig:
                 enabled=get_bool_env("RAG_DEPENDENCY_RECALL_ENABLED", True),
                 router_llm_enabled=get_bool_env("RAG_DEPENDENCY_ROUTER_LLM_ENABLED", True),
                 router_model=os.getenv("RAG_DEPENDENCY_ROUTER_MODEL", "qwen3.6-plus"),
-                seed_score_ratio=float(os.getenv("RAG_DEPENDENCY_SEED_SCORE_RATIO", "0.7")),
-                max_seeds=int(os.getenv("RAG_DEPENDENCY_MAX_SEEDS", "8")),
+                seed_score_ratio=float(os.getenv("RAG_DEPENDENCY_SEED_SCORE_RATIO", "0.6")),
+                max_seeds=int(os.getenv("RAG_DEPENDENCY_MAX_SEEDS", "10")),
+                seed_capability_weight=float(os.getenv("RAG_DEPENDENCY_SEED_CAPABILITY_WEIGHT", "0.3")),
                 min_confidence=float(os.getenv("RAG_DEPENDENCY_MIN_CONFIDENCE", "0.7")),
                 per_seed_limit=int(os.getenv("RAG_DEPENDENCY_PER_SEED_LIMIT", "5")),
-                total_limit=int(os.getenv("RAG_DEPENDENCY_TOTAL_LIMIT", "12")),
+                total_limit=int(os.getenv("RAG_DEPENDENCY_TOTAL_LIMIT", "16")),
+                max_forced_dependencies=int(os.getenv("RAG_DEPENDENCY_MAX_FORCED_DEPS", "15")),
                 vector_enabled=get_bool_env("RAG_DEPENDENCY_VECTOR_ENABLED", False),
             ),
             ranking=RetrievalRankingConfig(
                 llm_enabled=get_bool_env("RAG_RERANK_LLM_ENABLED", True),
                 llm_model=os.getenv("RAG_RERANK_LLM_MODEL", "qwen3.6-plus"),
                 llm_top_n=int(os.getenv("RAG_RERANK_LLM_TOP_N", "10")),
-                final_top_n=int(os.getenv("RAG_RERANK_FINAL_TOP_N", "5")),
+                final_top_n=int(os.getenv("RAG_RERANK_FINAL_TOP_N", "8")),
             ),
             answer=AnswerGenerationConfig(
                 enabled=get_bool_env("RAG_ANSWER_ENABLED", True),

@@ -255,9 +255,11 @@ class HybridRetriever:
         dependency_router: DependencyRecallRouter | None = None,
         dependency_seed_score_ratio: float = 0.7,
         dependency_max_seeds: int = 8,
+        dependency_seed_capability_weight: float = 0.3,
         dependency_min_confidence: float = 0.7,
         dependency_per_seed_limit: int = 5,
         dependency_total_limit: int = 12,
+        dependency_max_forced_dependencies: int = 15,
         dependency_vector_enabled: bool = False,
     ) -> None:
         self.embedder = embedder
@@ -277,9 +279,11 @@ class HybridRetriever:
         self.dependency_router = dependency_router or DependencyRecallRouter(llm_enabled=False)
         self.dependency_seed_score_ratio = dependency_seed_score_ratio
         self.dependency_max_seeds = dependency_max_seeds
+        self.dependency_seed_capability_weight = dependency_seed_capability_weight
         self.dependency_min_confidence = dependency_min_confidence
         self.dependency_per_seed_limit = dependency_per_seed_limit
         self.dependency_total_limit = dependency_total_limit
+        self.dependency_max_forced_dependencies = dependency_max_forced_dependencies
         self.dependency_vector_enabled = dependency_vector_enabled
         self.query_rewriter = query_rewriter
         self.reranker = reranker or DualStageReranker(rule_reranker=RuleBasedReranker(), llm_enabled=False)
@@ -334,6 +338,7 @@ class HybridRetriever:
                 coarse_ranked,
                 self.dependency_seed_score_ratio,
                 self.dependency_max_seeds,
+                self.dependency_seed_capability_weight,
             )
             dependency_expansion = expand_dependency_candidates(
                 query,
@@ -382,6 +387,7 @@ class HybridRetriever:
                 dependency_expansion.dependency_by_source,
                 final_ranked,
                 self.final_top_n,
+                self.dependency_max_forced_dependencies,
             )
         else:
             top_candidates = final_ranked[: self.final_top_n]

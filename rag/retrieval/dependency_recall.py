@@ -144,11 +144,46 @@ class DependencyRecallRouter:
             return DependencyRecallDecision(False, "lookup", 0.0, "路由模型失败，保守关闭")
 
 
+def calculate_dependency_capability_score(candidate: "RetrievalCandidate") -> float:
+    """评估候选chunk作为依赖seed的潜力，识别并降权干扰文档。"""
+    score = 0.0
+    metadata = candidate.metadata
+
+    # 1. dependency_topics 非空表示有依赖能力证据，+0.3
+    topics = metadata.get("dependency_topics", [])
+    if topics:
+        score += 0.3
+
+    # 2. heading_path 包含前置规范关键词，+0.4
+    heading_path = str(metadata.get("heading_path", ""))
+    prerequisite_keywords = ["说明", "规范", "配置", "流程", "机制", "错误码", "认证", "签名", "加密", "鉴权", "初始化"]
+    if any(kw in heading_path for kw in prerequisite_keywords):
+        score += 0.4
+
+    # 3. chunk 类型是 "api"（接口定义），+0.2
+    if metadata.get("type") == "api":
+        score += 0.2
+
+    # 4. heading_path 包含通用词，识别为干扰文档，-0.3
+    generic_keywords = ["介绍", "概述", "简介", "背景", "产品", "优势", "特性"]
+    if any(kw in heading_path for kw in generic_keywords):
+        score -= 0.3
+
+    # 5. 质量评分低于阈值，-0.2
+    quality_score = metadata.get("quality_score", 1.0)
+    if quality_score < 0.7:
+        score -= 0.2
+
+    return max(0.0, min(1.0, score))
+
+
 def select_dependency_seeds(
     candidates: list["RetrievalCandidate"],
     score_ratio: float = 0.7,
     max_seeds: int = 8,
+    capability_weight: float = 0.3,
 ) -> list["RetrievalCandidate"]:
+    """选择依赖扩展的seed，混合final_score和依赖能力评分。"""
     eligible = [
         candidate
         for candidate in candidates
@@ -157,11 +192,24 @@ def select_dependency_seeds(
     ]
     if not eligible or max_seeds <= 0:
         return []
-    highest = eligible[0].final_score
+
+    # 计算混合分数：final_score * (1-w) + capability_score * w
+    for candidate in eligible:
+        capability_score = calculate_dependency_capability_score(candidate)
+        candidate.dependency_seed_score = (
+            candidate.final_score * (1 - capability_weight) + capability_score * capability_weight
+        )
+
+    # 按混合分数重新排序
+    eligible_sorted = sorted(eligible, key=lambda c: getattr(c, "dependency_seed_score", c.final_score), reverse=True)
+
+    # 选择seeds
+    highest = getattr(eligible_sorted[0], "dependency_seed_score", eligible_sorted[0].final_score)
     threshold = highest * max(0.0, score_ratio)
     seeds: list["RetrievalCandidate"] = []
-    for candidate in eligible:
-        if seeds and candidate.final_score < threshold:
+    for candidate in eligible_sorted:
+        seed_score = getattr(candidate, "dependency_seed_score", candidate.final_score)
+        if seeds and seed_score < threshold:
             break
         seeds.append(candidate)
         if len(seeds) >= max_seeds:
@@ -279,24 +327,58 @@ def assemble_dependency_context(
     dependency_by_source: dict[str, list[str]],
     candidates: list["RetrievalCandidate"],
     final_top_n: int = 5,
+    max_forced_dependencies: int = 15,
+    ensure_seed_in_context: bool = True,
 ) -> list["RetrievalCandidate"]:
     """合并常规 TopN 与按 seed 顺序排列的强制依赖证据。
 
     依赖扩展阶段已经通过 ``total_limit`` 防止依赖证据无限增长，因此此处不再
     对它们截断，也不让它们挤占常规重排 TopN 的配额。
-    """
-    by_id = {candidate.node_id: candidate for candidate in candidates}
-    result = list(candidates[: max(final_top_n, 0)])
-    seen = {candidate.node_id for candidate in result}
 
-    # 依赖证据必须保持按 seed 及其依赖边的原始顺序追加到最终上下文。
-    # seed 自身已由常规 TopN 决定是否进入，不应额外挤占该配额。
+    Args:
+        seeds: 依赖扩展的种子候选
+        dependency_by_source: seed到依赖node_id的映射
+        candidates: 重排后的所有候选
+        final_top_n: 常规TopN数量
+        max_forced_dependencies: 强制依赖证据的最大数量
+        ensure_seed_in_context: 确保高分seed进入上下文
+    """
+    logger = logging.getLogger("rag.dependency_recall")
+    by_id = {candidate.node_id: candidate for candidate in candidates}
+    result: list["RetrievalCandidate"] = []
+    seen: set[str] = set()
+
+    # 第一步：确保高分seeds进入上下文（如果它们在TopN范围内）
+    if ensure_seed_in_context:
+        for seed in seeds[: min(final_top_n, len(seeds))]:
+            if seed.node_id in by_id:
+                result.append(seed)
+                seen.add(seed.node_id)
+
+    # 第二步：补充常规TopN（去重）
+    for candidate in candidates[: max(final_top_n, 0)]:
+        if candidate.node_id not in seen:
+            result.append(candidate)
+            seen.add(candidate.node_id)
+
+    # 第三步：追加强制依赖证据（按seed顺序，受max_forced_dependencies限制）
+    forced_count = 0
     for seed in seeds:
         for dependency_id in dependency_by_source.get(seed.node_id, []):
             if dependency_id in seen or dependency_id not in by_id:
                 continue
+            if forced_count >= max_forced_dependencies:
+                logger.warning(
+                    "强制依赖证据达到上限 | max_forced_dependencies=%s | 停止追加",
+                    max_forced_dependencies,
+                )
+                break
             result.append(by_id[dependency_id])
             seen.add(dependency_id)
+            forced_count += 1
+        if forced_count >= max_forced_dependencies:
+            break
+
     return result
 
 

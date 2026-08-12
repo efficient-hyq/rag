@@ -59,9 +59,11 @@ def build_query_service(config: QueryConfig | None = None) -> "QueryService":
         ),
         dependency_seed_score_ratio=cfg.dependency.seed_score_ratio,
         dependency_max_seeds=cfg.dependency.max_seeds,
+        dependency_seed_capability_weight=cfg.dependency.seed_capability_weight,
         dependency_min_confidence=cfg.dependency.min_confidence,
         dependency_per_seed_limit=cfg.dependency.per_seed_limit,
         dependency_total_limit=cfg.dependency.total_limit,
+        dependency_max_forced_dependencies=cfg.dependency.max_forced_dependencies,
         dependency_vector_enabled=cfg.dependency.vector_enabled,
     )
     answer_generator = AnswerGenerator(

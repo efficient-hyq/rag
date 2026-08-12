@@ -10,7 +10,7 @@ def main() -> None:
     """命令行查询入口，执行完整的召回、重排和答案生成。"""
     configure_console_logging()
     parser = argparse.ArgumentParser(description="执行完整 RAG 查询并生成答案")
-    parser.add_argument("question", nargs="?", default="如何接入支付网关的ios支付,除了预订单还有其他的吗？", help="用户问题")
+    parser.add_argument("question", nargs="?", default="如何接入支付网关的ios支付？", help="用户问题")
     args = parser.parse_args()
 
     try:

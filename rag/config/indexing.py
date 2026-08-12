@@ -28,7 +28,7 @@ class AnnotationConfig:
     """离线语义标注配置。"""
 
     model: str = "qwen3.6-plus"
-    workers: int = 5
+    workers: int = 10
     prompt_path: Path = Path("prompts/annotation_v4.md")
     prompt_version: str = "annotation_v4"
 
@@ -69,7 +69,7 @@ class BuildIndexConfig:
             ),
             annotation=AnnotationConfig(
                 model=os.getenv("RAG_ANNOTATOR_MODEL"),
-                workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "5")),
+                workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "10")),
                 prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v4.md")),
                 prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v4"),
             ),

@@ -85,15 +85,21 @@ class SemanticAnnotator:
         if show_progress:
             print_progress(ProgressSnapshot("标注", len(nodes), completed, failed))
 
+        start_time = time.time()
+        logger.info("开始并发标注 | 待标注=%s | 并发数=%s | 开始时间=%s",
+                    len(pending), self.max_workers, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time)))
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {executor.submit(self.annotate_text, node.text): node for node in pending}
+            futures = {executor.submit(self._annotate_with_timing, node.text): node for node in pending}
             for future in as_completed(futures):
                 node = futures[future]
                 key = self._cache_key(node)
                 try:
-                    annotation = future.result()
+                    annotation, elapsed, start_ts, end_ts = future.result()
                     status = "success"
                     error = None
+                    logger.info("标注成功 | node_id=%s | 耗时=%.2fs | 开始=%s | 结束=%s",
+                                node.id_, elapsed, start_ts, end_ts)
                 except Exception as exc:
                     annotation = dict(EMPTY_ANNOTATION)
                     status = "failed"
@@ -108,7 +114,12 @@ class SemanticAnnotator:
                 completed += 1
                 if show_progress:
                     print_progress(ProgressSnapshot("标注", len(nodes), completed, failed))
-        logger.info("标注阶段结束 | 总数=%s | 成功=%s | 失败=%s", len(nodes), len(nodes) - failed, failed)
+
+        end_time = time.time()
+        elapsed = end_time - start_time
+        logger.info("标注阶段结束 | 总数=%s | 成功=%s | 失败=%s | 耗时=%.2fs | 结束时间=%s",
+                    len(nodes), len(nodes) - failed, failed, elapsed,
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time)))
         return AnnotationRunResult(nodes=nodes, failed_keys=failed_keys)
 
     def annotate_text(self, text: str) -> dict[str, Any]:
@@ -133,6 +144,16 @@ class SemanticAnnotator:
         if last_error:
             raise last_error
         return dict(EMPTY_ANNOTATION)
+
+    def _annotate_with_timing(self, text: str) -> tuple[dict[str, Any], float, str, str]:
+        """带计时的标注方法，返回 (annotation, elapsed_time, start_time, end_time)。"""
+        start = time.time()
+        start_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start))
+        annotation = self.annotate_text(text)
+        end = time.time()
+        end_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end))
+        elapsed = end - start
+        return annotation, elapsed, start_ts, end_ts
 
     def _cache_key(self, node: Any) -> str:
         return f"{node_key(node)}|annotation|{self.prompt_version}|{self.prompt_hash}"

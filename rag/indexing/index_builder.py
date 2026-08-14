@@ -190,8 +190,8 @@ def build_offline_index(
                 metadata_path=writer.metadata_path,
             )
 
-        # 清理依赖缓存
-        checkpoint.remove_dependency_documents(decision.need_redependency)
+        # 依赖 cache_key 已含 doc_hash|prompt_version|prompt_hash，不预删缓存；
+        # 续跑靠 load_dependency_cards 命中跳过，末尾按当前 hash 清理孤儿卡。
 
         graph_aggregator = dependency_aggregator or DocumentDependencyAggregator(
             api_key=cfg.llm.api_key or "",
@@ -235,6 +235,7 @@ def build_offline_index(
             ctx,
         )
         checkpoint.save_document_index_state(next_state)
+        checkpoint.prune_dependency_cards(current_hashes)
 
         logger.info("依赖分析完成 | 文档数=%s", len(dependency_result.documents))
         return IndexResult(
@@ -249,8 +250,8 @@ def build_offline_index(
     rebuild_keys = sorted(decision.need_reannotate)
     rebuild_files = [current_files[key] for key in rebuild_keys]
 
-    # 先清理依赖缓存（依赖 key 基于 doc_key，不依赖 chunks）
-    checkpoint.remove_dependency_documents(decision.need_redependency)
+    # 依赖 cache_key 已含 doc_hash|prompt_version|prompt_hash，内容或协议变化时自然不命中，
+    # 续跑靠 load_dependency_cards 命中跳过；不在此预删缓存，避免断点续跑时误删有效依赖卡。
 
     with log_phase(logger, "加载文档", docs=len(rebuild_files)):
         documents = load_documents_from_files(rebuild_files, docs_root)
@@ -267,9 +268,8 @@ def build_offline_index(
         nodes = split_documents(documents, cfg.chunking.chunk_size, cfg.chunking.chunk_overlap)
     logger.info("切分完成 | chunk数=%s", len(nodes))
 
-    # 切分后再清理标注缓存（基于新生成的 node_id）
-    checkpoint.remove_annotation_by_node_ids({node_key(node) for node in nodes})
-
+    # 标注 cache_key 已含 prompt_version|prompt_hash，内容变化时 node_id 也会变，
+    # 续跑靠 annotate_nodes 命中跳过；不在此预删缓存，避免断点续跑时误删有效标注。
     manifest = build_manifest(ctx, docs_root, storage_root)
     checkpoint.write_manifest(manifest)
     checkpoint.write_chunks(nodes)
@@ -406,6 +406,7 @@ def build_offline_index(
     checkpoint.save_document_index_state(next_state)
     checkpoint.remove_node_records(stale_node_ids - document_state_node_ids(next_state))
     checkpoint.remove_dependency_documents(decision.deleted_docs)
+    checkpoint.prune_dependency_cards(current_hashes)
     logger.info(
         "离线索引完成 | chunk数=%s | metadata=%s | bm25=%s",
         result.node_count,

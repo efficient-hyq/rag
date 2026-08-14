@@ -199,6 +199,27 @@ class CheckpointStore:
             for record in records.values():
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def prune_dependency_cards(self, keep_hashes: dict[str, str]) -> None:
+        """清理过期的依赖卡缓存，仅保留当前内容哈希命中的记录。
+
+        依赖卡 cache_key 形如 {doc_key}|{doc_hash}|{prompt_version}|{prompt_hash}。
+        文档内容变化后旧 doc_hash 的记录不再命中，属于应清理的孤儿；
+        prompt 变化时旧 prompt_version/hash 后缀的记录同理。传入完整的当前
+        doc_hash 映射，保证未参与本次重建的文档依赖卡不被误删。
+        """
+        if not keep_hashes:
+            return
+        kept: dict[str, dict[str, Any]] = {}
+        for key, record in self._load_jsonl_by_key(self.dependency_cards_path).items():
+            doc_key = key.split("|", 1)[0]
+            current_hash = keep_hashes.get(doc_key)
+            if current_hash is not None and key.startswith(f"{doc_key}|{current_hash}|"):
+                kept[key] = record
+        self.dependency_cards_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.dependency_cards_path.open("w", encoding="utf-8") as file:
+            for record in kept.values():
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def load_embeddings(self, route: str) -> dict[str, list[float]]:
         path = self._embedding_path(route)
         return {

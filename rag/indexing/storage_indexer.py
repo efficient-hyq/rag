@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from rag.indexing.chunk_context import build_retrieval_text
-from rag.retrieval.tokenization import tokenize_technical_text
+from rag.retrieval.tokenization import tokenize_for_bm25
 
 
 @dataclass
@@ -85,7 +85,7 @@ class MultiRouteIndexer:
         self.bm25_path = self.storage_dir / "bm25.pkl"
         self.metadata_path = self.storage_dir / "metadata.json"
         self.chroma_client = chroma_client
-        self.tokenizer = tokenizer or tokenize_technical_text
+        self.tokenizer = tokenizer or tokenize_for_bm25
 
     def index(
         self,

@@ -84,30 +84,39 @@ def split_markdown_chunks(markdown: str, chunk_size: int, chunk_overlap: int) ->
        - 小于 chunk_size：整个 H2 章节作为一个 chunk
        - 大于 chunk_size 但小于 2*chunk_size：尝试在 H3 边界切分
        - 远大于 2*chunk_size：按常规逻辑切分，H3 原子章节保护
-    3. H3 原子保护：只对包含特定关键词的 H3/H4 标题生效（<800 tokens）
+    3. H3 原子保护：只对包含特定关键词的 H3/H4 标题生效。
+       不超过 H3_ATOMIC_MAX_TOKENS 时整节保留；超过后按常规规则落盘，不丢弃正文。
+    4. heading_path 按标题级别入栈。文档 H1 会带入后续章节；一个 chunk 覆盖整节时，
+       路径停在覆盖整节的标题，而不是最后一个子标题。
+    5. 只有标题、没有正文的碎片并入相邻 chunk，避免占用召回名额。
     """
     blocks = list(split_markdown_blocks(markdown))
     chunks: list[dict[str, str]] = []
+    inherited_stack = _leading_heading_stack(blocks)
 
     # 按 H2 标题分组
     h2_sections = _group_by_h2_sections(blocks)
 
-    # 对每个 H2 章节独立处理
+    # 对每个 H2 章节独立处理。H1 不在分组内部时，从文档开头继承进来。
     for section_blocks in h2_sections:
         section_tokens = sum(estimate_token_size(b) for b in section_blocks)
-        section_heading_path = _extract_heading_path(section_blocks)
+        section_inherited = _inherited_stack_for_section(section_blocks, inherited_stack)
 
         if section_tokens <= chunk_size:
             # 策略 1：H2 章节较小，整个作为一个 chunk
-            _append_chunk(chunks, section_blocks, section_heading_path)
+            _append_chunk_from_items(chunks, _annotate_blocks(section_blocks, section_inherited))
         elif section_tokens <= chunk_size * 2:
             # 策略 2：中等大小，尝试在 H3 边界切分
-            _split_by_h3_boundaries(chunks, section_blocks, chunk_size, chunk_overlap)
+            _split_by_h3_boundaries(
+                chunks, section_blocks, chunk_size, chunk_overlap, section_inherited
+            )
         else:
             # 策略 3：H2 章节很大，应用常规切分 + H3 原子保护
-            _split_with_h3_atomic_protection(chunks, section_blocks, chunk_size, chunk_overlap)
+            _split_with_h3_atomic_protection(
+                chunks, section_blocks, chunk_size, chunk_overlap, section_inherited
+            )
 
-    return chunks
+    return _merge_heading_only_chunks(chunks)
 
 
 def _group_by_h2_sections(blocks: list[str]) -> list[list[str]]:
@@ -129,24 +138,173 @@ def _group_by_h2_sections(blocks: list[str]) -> list[list[str]]:
     return sections
 
 
-def _extract_heading_path(blocks: list[str]) -> str:
-    """从 blocks 中提取标题路径"""
-    heading_stack: list[str] = []
+def _leading_heading_stack(blocks: list[str]) -> list[tuple[int, str]]:
+    """取出第一个 H2 之前的标题栈。文档 H1 要带进后面的每个分组。"""
+    stack: list[tuple[int, str]] = []
     for block in blocks:
-        match = re.match(r"^(#+)\s+(.+?)\s*$", block)
-        if match:
-            level = len(match.group(1))
-            title = match.group(2).strip()
-            heading_stack = heading_stack[: level - 1]
-            heading_stack.append(title)
-    return " > ".join(heading_stack)
+        level = _get_heading_level(block)
+        if level <= 0:
+            continue
+        if level >= 2:
+            break
+        title = _heading_title(block)
+        if title:
+            stack = _push_heading(stack, level, title)
+    return stack
 
 
-def _append_chunk(chunks: list[dict[str, str]], blocks: list[str], path: str) -> None:
-    """添加一个 chunk"""
-    text = "\n\n".join(blocks).strip()
-    if text:
-        chunks.append({"text": text, "heading_path": path})
+def _inherited_stack_for_section(
+    section_blocks: list[str],
+    inherited_stack: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
+    """分组自己已经包含这些标题时，不再从外部重复压入。"""
+    if not inherited_stack:
+        return []
+    root_level, root_title = inherited_stack[0]
+    contains_root = any(
+        _get_heading_level(block) == root_level and _heading_title(block) == root_title
+        for block in section_blocks
+    )
+    if contains_root:
+        return []
+    return list(inherited_stack)
+
+
+def _push_heading(
+    stack: list[tuple[int, str]],
+    level: int,
+    title: str,
+) -> list[tuple[int, str]]:
+    """按级别维护标题栈。新标题会弹出所有同级和更深的标题，避免平级标题被当成父子。"""
+    updated = list(stack)
+    while updated and updated[-1][0] >= level:
+        updated.pop()
+    updated.append((level, title))
+    return updated
+
+
+def _heading_title(block: str) -> str:
+    match = re.match(r"^#+\s+(.+?)\s*$", block)
+    return match.group(1).strip() if match else ""
+
+
+def _format_heading_path(stack: list[tuple[int, str]]) -> str:
+    return " > ".join(title for _, title in stack)
+
+
+def _annotate_blocks(
+    blocks: list[str],
+    inherited_stack: list[tuple[int, str]],
+) -> list[tuple[str, list[tuple[int, str]]]]:
+    """给每个块带上它所属的标题栈。栈在遇到标题后立即更新。"""
+    stack = list(inherited_stack)
+    items: list[tuple[str, list[tuple[int, str]]]] = []
+    for block in blocks:
+        level = _get_heading_level(block)
+        if level > 0:
+            title = _heading_title(block)
+            if title:
+                stack = _push_heading(stack, level, title)
+        items.append((block, list(stack)))
+    return items
+
+
+def _append_chunk_from_items(
+    chunks: list[dict[str, str]],
+    items: list[tuple[str, list[tuple[int, str]]]],
+) -> None:
+    text = "\n\n".join(block for block, _ in items).strip()
+    if not text:
+        return
+    chunks.append({"text": text, "heading_path": _heading_path_from_items(items)})
+
+
+def _heading_path_from_items(items: list[tuple[str, list[tuple[int, str]]]]) -> str:
+    """一个 chunk 的路径是能覆盖它全部内容的标题。
+
+    标题层层变深、且更深标题前没有正文时，用最深的标题。
+    出现平级标题，或父级标题下已经有正文时，停在它们的公共上级，
+    这样整节 chunk 不会被标成最后一个子标题。
+    """
+    if not items:
+        return ""
+    blocks = [block for block, _ in items]
+    stacks = [stack for _, stack in items]
+    heading_positions = [index for index, block in enumerate(blocks) if _get_heading_level(block) > 0]
+    if not heading_positions:
+        return _format_heading_path(stacks[0])
+
+    heading_stacks = [stacks[index] for index in heading_positions]
+    last_heading = heading_positions[-1]
+    body_before_last = any(
+        _get_heading_level(block) == 0 and block.strip()
+        for block in blocks[:last_heading]
+    )
+    if _is_single_heading_chain(heading_stacks) and not body_before_last:
+        return _format_heading_path(heading_stacks[-1])
+    return _format_heading_path(_common_heading_prefix(stacks))
+
+
+def _is_single_heading_chain(stacks: list[list[tuple[int, str]]]) -> bool:
+    for previous, current in zip(stacks, stacks[1:]):
+        if len(current) <= len(previous):
+            return False
+        if current[: len(previous)] != previous:
+            return False
+    return True
+
+
+def _common_heading_prefix(stacks: list[list[tuple[int, str]]]) -> list[tuple[int, str]]:
+    if not stacks:
+        return []
+    prefix = list(stacks[0])
+    for stack in stacks[1:]:
+        limit = min(len(prefix), len(stack))
+        index = 0
+        while index < limit and prefix[index] == stack[index]:
+            index += 1
+        prefix = prefix[:index]
+        if not prefix:
+            break
+    return prefix
+
+
+def _is_heading_only_text(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(_get_heading_level(line) > 0 and _heading_title(line) for line in lines)
+
+
+def _merge_heading_only_chunks(chunks: list[dict[str, str]]) -> list[dict[str, str]]:
+    """只有标题的 chunk 没有信息量，并入后一个 chunk；末尾则并入前一个。"""
+    if len(chunks) <= 1:
+        return chunks
+
+    merged: list[dict[str, str]] = []
+    pending: list[str] = []
+    for chunk in chunks:
+        if _is_heading_only_text(chunk["text"]):
+            pending.append(chunk["text"])
+            continue
+        if pending:
+            chunk = {
+                "text": "\n\n".join(pending + [chunk["text"]]),
+                "heading_path": chunk["heading_path"],
+            }
+            pending = []
+        merged.append(chunk)
+
+    if not pending:
+        return merged
+    tail = "\n\n".join(pending)
+    if not merged:
+        return [{"text": tail, "heading_path": chunks[-1]["heading_path"]}]
+    merged[-1] = {
+        "text": merged[-1]["text"] + "\n\n" + tail,
+        "heading_path": merged[-1]["heading_path"],
+    }
+    return merged
 
 
 def _split_by_h3_boundaries(
@@ -154,8 +312,10 @@ def _split_by_h3_boundaries(
     section_blocks: list[str],
     chunk_size: int,
     chunk_overlap: int,
+    inherited_stack: list[tuple[int, str]],
 ) -> None:
     """在 H3 边界切分中等大小的 H2 章节，优化：避免产生只包含 H2 标题的 chunk"""
+    del chunk_overlap  # 这一路按 H3 分组打包，分组边界不再做块级 overlap
     h3_groups = _group_by_h3_within_section(section_blocks)
 
     # 优化：如果第一个组只包含 H2 标题（很小），将其合并到第二个组
@@ -168,23 +328,31 @@ def _split_by_h3_boundaries(
             h3_groups[1] = first_group + h3_groups[1]
             h3_groups = h3_groups[1:]  # 移除第一个组
 
-    current_blocks: list[str] = []
-    current_tokens = 0
+    heading_stack = list(inherited_stack)
+    current_items: list[tuple[str, list[tuple[int, str]]]] = []
 
     for h3_blocks in h3_groups:
-        h3_tokens = sum(estimate_token_size(b) for b in h3_blocks)
+        group_items: list[tuple[str, list[tuple[int, str]]]] = []
+        for block in h3_blocks:
+            level = _get_heading_level(block)
+            if level > 0:
+                title = _heading_title(block)
+                if title:
+                    heading_stack = _push_heading(heading_stack, level, title)
+            group_items.append((block, list(heading_stack)))
+
+        h3_tokens = sum(estimate_token_size(block) for block, _ in group_items)
+        current_tokens = sum(estimate_token_size(block) for block, _ in current_items)
 
         # 如果加入当前 H3 会超出 chunk_size，先提交累积的内容
-        if current_blocks and current_tokens + h3_tokens > chunk_size:
-            _append_chunk(chunks, current_blocks, _extract_heading_path(current_blocks))
-            current_blocks = []
-            current_tokens = 0
+        if current_items and current_tokens + h3_tokens > chunk_size:
+            _append_chunk_from_items(chunks, current_items)
+            current_items = []
 
-        current_blocks.extend(h3_blocks)
-        current_tokens += h3_tokens
+        current_items.extend(group_items)
 
-    if current_blocks:
-        _append_chunk(chunks, current_blocks, _extract_heading_path(current_blocks))
+    if current_items:
+        _append_chunk_from_items(chunks, current_items)
 
 
 def _group_by_h3_within_section(section_blocks: list[str]) -> list[list[str]]:
@@ -212,141 +380,149 @@ def _split_with_h3_atomic_protection(
     section_blocks: list[str],
     chunk_size: int,
     chunk_overlap: int,
+    inherited_stack: list[tuple[int, str]],
 ) -> None:
-    """对大 H2 章节应用常规切分 + H3 原子保护"""
-    current_blocks: list[str] = []
-    current_tokens = 0
-    current_heading_path = ""
-    heading_stack: list[str] = []
+    """对大 H2 章节应用常规切分 + H3 原子保护。"""
+    current_items: list[tuple[str, list[tuple[int, str]]]] = []
+    heading_stack = list(inherited_stack)
 
-    # H3 原子章节状态
     in_h3_atomic = False
-    h3_atomic_blocks: list[str] = []
+    h3_atomic_items: list[tuple[str, list[tuple[int, str]]]] = []
     h3_atomic_tokens = 0
-    h3_atomic_path = ""
 
     for block in section_blocks:
-        is_heading = re.match(r"^#+\s+", block) is not None
+        is_heading = _get_heading_level(block) > 0
         level = _get_heading_level(block)
         block_tokens = estimate_token_size(block)
-
-        # 更新标题栈
         if is_heading:
-            match = re.match(r"^#+\s+(.+?)\s*$", block)
-            if match:
-                title = match.group(1).strip()
-                heading_stack = heading_stack[: level - 1]
-                heading_stack.append(title)
-
-        block_heading_path = " > ".join(heading_stack)
+            title = _heading_title(block)
+            if title:
+                heading_stack = _push_heading(heading_stack, level, title)
+        block_stack = list(heading_stack)
 
         # 检测 H3/H4 原子章节开始
         if is_heading and not in_h3_atomic and level >= 3 and _is_h3_atomic_heading(block):
-            # 优化：如果 current_blocks 只包含上级标题且很小（如单个 H2），将其并入 H3 原子章节
-            # 避免产生信息量极少的 chunk（如只有一个 H2 标题）
+            # 上级标题很小（通常只有一个 H2）时并入原子章节，避免单独成块
+            parent_blocks = [item for item, _ in current_items]
+            current_tokens = sum(estimate_token_size(item) for item in parent_blocks)
             should_merge_parent_headings = (
-                current_blocks
-                and current_tokens < 50  # 很小，通常只是标题
-                and all(_get_heading_level(b) > 0 and _get_heading_level(b) < level for b in current_blocks)
+                current_items
+                and current_tokens < 50
+                and all(_get_heading_level(item) > 0 and _get_heading_level(item) < level for item in parent_blocks)
             )
 
-            if current_blocks and not should_merge_parent_headings:
-                # 提交之前的内容（如果不是要合并的上级标题）
-                _append_chunk(chunks, current_blocks, current_heading_path)
-                current_blocks = []
-                current_tokens = 0
+            if current_items and not should_merge_parent_headings:
+                _append_chunk_from_items(chunks, current_items)
+                current_items = []
 
-            # 开始 H3 原子章节
             in_h3_atomic = True
-            h3_atomic_blocks = current_blocks + [block]  # 可能包含上级标题
-            h3_atomic_tokens = current_tokens + block_tokens
-            h3_atomic_path = block_heading_path
-            current_blocks = []
-            current_tokens = 0
+            parent_items = current_items if should_merge_parent_headings else []
+            h3_atomic_items = parent_items + [(block, block_stack)]
+            h3_atomic_tokens = sum(estimate_token_size(item) for item, _ in parent_items) + block_tokens
+            current_items = []
             continue
 
         # 检测 H3 原子章节结束（遇到同级或更高级标题）
         if in_h3_atomic and is_heading and level <= 3:
-            # 提交 H3 原子章节
             if h3_atomic_tokens <= H3_ATOMIC_MAX_TOKENS:
-                _append_chunk(chunks, h3_atomic_blocks, h3_atomic_path)
+                _append_chunk_from_items(chunks, h3_atomic_items)
+                current_items = []
             else:
-                # 超过阈值，降级为常规切分
-                for atomic_block in h3_atomic_blocks:
-                    _regular_chunking_append(
-                        chunks, current_blocks, current_tokens, current_heading_path,
-                        atomic_block, h3_atomic_path, chunk_size, chunk_overlap
+                # 超过阈值后按常规规则落盘。必须接住返回的累积列表，不能每处理一块就换成空列表。
+                current_items = []
+                for atomic_block, atomic_stack in h3_atomic_items:
+                    current_items = _append_block_item(
+                        chunks,
+                        current_items,
+                        atomic_block,
+                        atomic_stack,
+                        chunk_size,
+                        chunk_overlap,
                     )
-                    current_blocks, current_tokens, current_heading_path = [], 0, h3_atomic_path
 
-            # 退出 H3 原子模式
             in_h3_atomic = False
-            h3_atomic_blocks = []
+            h3_atomic_items = []
             h3_atomic_tokens = 0
 
-        # 在 H3 原子章节内，持续累积
         if in_h3_atomic:
-            h3_atomic_blocks.append(block)
+            h3_atomic_items.append((block, block_stack))
             h3_atomic_tokens += block_tokens
             continue
 
-        # 常规切分逻辑
-        if current_blocks and current_tokens + block_tokens > chunk_size:
-            _append_chunk(chunks, current_blocks, current_heading_path)
-            overlap_blocks = _pick_overlap_blocks(current_blocks, chunk_overlap)
-            current_blocks = overlap_blocks[:]
-            current_tokens = sum(estimate_token_size(b) for b in current_blocks)
-            if not current_blocks:
-                current_heading_path = block_heading_path
+        current_items = _append_block_item(
+            chunks,
+            current_items,
+            block,
+            block_stack,
+            chunk_size,
+            chunk_overlap,
+        )
 
-        if not current_blocks or is_heading:
-            current_heading_path = block_heading_path
-
-        if block_tokens > chunk_size and not _is_atomic_markdown_block(block):
-            for part in _split_large_text_block(block, chunk_size):
-                if current_blocks:
-                    _append_chunk(chunks, current_blocks, current_heading_path)
-                    current_blocks = []
-                    current_tokens = 0
-                _append_chunk(chunks, [part.strip()], current_heading_path)
-            continue
-
-        current_blocks.append(block)
-        current_tokens += block_tokens
-
-    # 处理剩余的 H3 原子章节
-    if in_h3_atomic and h3_atomic_blocks:
+    if in_h3_atomic and h3_atomic_items:
         if h3_atomic_tokens <= H3_ATOMIC_MAX_TOKENS:
-            _append_chunk(chunks, h3_atomic_blocks, h3_atomic_path)
+            _append_chunk_from_items(chunks, h3_atomic_items)
         else:
-            for atomic_block in h3_atomic_blocks:
-                _regular_chunking_append(
-                    chunks, current_blocks, current_tokens, current_heading_path,
-                    atomic_block, h3_atomic_path, chunk_size, chunk_overlap
+            for atomic_block, atomic_stack in h3_atomic_items:
+                current_items = _append_block_item(
+                    chunks,
+                    current_items,
+                    atomic_block,
+                    atomic_stack,
+                    chunk_size,
+                    chunk_overlap,
                 )
-                current_blocks, current_tokens = [], 0
 
-    # 处理剩余的常规块
-    if current_blocks:
-        _append_chunk(chunks, current_blocks, current_heading_path)
+    if current_items:
+        _append_chunk_from_items(chunks, current_items)
 
 
-def _regular_chunking_append(
+def _append_block_item(
     chunks: list[dict[str, str]],
-    current_blocks: list[str],
-    current_tokens: int,
-    current_heading_path: str,
+    current_items: list[tuple[str, list[tuple[int, str]]]],
     block: str,
-    block_heading_path: str,
+    block_stack: list[tuple[int, str]],
     chunk_size: int,
     chunk_overlap: int,
-) -> None:
-    """常规切分时添加 block"""
+) -> list[tuple[str, list[tuple[int, str]]]]:
+    """把一个块并入当前 chunk。装满后先落盘，并返回更新后的累积状态。"""
     block_tokens = estimate_token_size(block)
-    if current_blocks and current_tokens + block_tokens > chunk_size:
-        _append_chunk(chunks, current_blocks, current_heading_path)
-        current_blocks.clear()
-    current_blocks.append(block)
+    current_tokens = sum(estimate_token_size(item) for item, _ in current_items)
+    if current_items and current_tokens + block_tokens > chunk_size:
+        _append_chunk_from_items(chunks, current_items)
+        current_items = _pick_overlap_items(current_items, chunk_overlap)
+
+    if block_tokens > chunk_size and not _is_atomic_markdown_block(block):
+        if current_items:
+            _append_chunk_from_items(chunks, current_items)
+            current_items = []
+        for part in _split_large_text_block(block, chunk_size):
+            part = part.strip()
+            if part:
+                _append_chunk_from_items(chunks, [(part, block_stack)])
+        return current_items
+
+    current_items.append((block, block_stack))
+    return current_items
+
+
+def _pick_overlap_items(
+    items: list[tuple[str, list[tuple[int, str]]]],
+    chunk_overlap: int,
+) -> list[tuple[str, list[tuple[int, str]]]]:
+    """选择 overlap，跳过超过 overlap 预算的大表格，优先保留标题和小段落。"""
+    if chunk_overlap <= 0:
+        return []
+    picked: list[tuple[str, list[tuple[int, str]]]] = []
+    total = 0
+    for item in reversed(items):
+        block_tokens = estimate_token_size(item[0])
+        if block_tokens > chunk_overlap:
+            continue
+        if picked and total + block_tokens > chunk_overlap:
+            break
+        picked.insert(0, item)
+        total += block_tokens
+    return picked
 
 
 def _is_h3_atomic_heading(block: str) -> bool:
@@ -450,28 +626,3 @@ def _split_large_text_block(block: str, chunk_size: int) -> list[str]:
     if current:
         parts.append("\n".join(current))
     return parts
-
-
-def _pick_overlap_blocks(blocks: list[str], chunk_overlap: int) -> list[str]:
-    """选择 overlap 块，但跳过大表格以避免重复。
-
-    策略：
-    1. 如果 block 是大表格（超过 overlap 限制），跳过
-    2. 优先选择标题和小段落作为 overlap
-    """
-    if chunk_overlap <= 0:
-        return []
-    picked: list[str] = []
-    total = 0
-    for block in reversed(blocks):
-        block_tokens = estimate_token_size(block)
-
-        # 跳过超大块（主要是大表格），避免重复
-        if block_tokens > chunk_overlap:
-            continue
-
-        if picked and total + block_tokens > chunk_overlap:
-            break
-        picked.insert(0, block)
-        total += block_tokens
-    return picked

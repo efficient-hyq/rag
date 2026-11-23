@@ -23,7 +23,7 @@ from rag.retrieval.dependency_recall import (
     select_dependency_seeds,
 )
 from rag.indexing.publication import resolve_final_index
-from rag.retrieval.tokenization import tokenize_technical_text
+from rag.retrieval.tokenization import tokenize_for_bm25, tokenize_technical_text
 
 
 @dataclass
@@ -205,7 +205,7 @@ def expand_neighbor_candidates(
 class BM25KeywordRetriever:
     """基于本地 BM25 索引的关键词召回器。"""
 
-    def __init__(self, bm25_path: str | Path, tokenizer=tokenize_technical_text) -> None:
+    def __init__(self, bm25_path: str | Path, tokenizer=tokenize_for_bm25) -> None:
         self.bm25_path = Path(bm25_path)
         if not self.bm25_path.exists():
             raise FileNotFoundError(f"BM25 索引不存在: {self.bm25_path}")
@@ -222,7 +222,8 @@ class BM25KeywordRetriever:
             reverse=True,
         )
         hits: list[RetrievedRouteHit] = []
-        for rank, (node_id, score) in enumerate(ranked[:top_k], start=1):
+        positive = [(node_id, score) for node_id, score in ranked if score > 0]
+        for rank, (node_id, score) in enumerate(positive[:top_k], start=1):
             hits.append(
                 RetrievedRouteHit(
                     node_id=str(node_id),

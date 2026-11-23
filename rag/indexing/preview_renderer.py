@@ -37,7 +37,8 @@ def _group_nodes_by_doc_id(nodes: list[Any]) -> dict[str, list[Any]]:
     for node in nodes:
         metadata = dict(getattr(node, "metadata", {}) or {})
         doc_id = str(
-            metadata.get("cleaned_markdown_relative_path")
+            metadata.get("markdown_relative_path")
+            or metadata.get("cleaned_markdown_relative_path")
             or metadata.get("doc_id")
             or metadata.get("file_path")
             or "unknown"

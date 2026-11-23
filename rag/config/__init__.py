@@ -1,7 +1,13 @@
 """按流程拆分的配置模块导出。"""
 
 from rag.config.common import EmbeddingConfig, LLMServiceConfig, PathConfig
-from rag.config.indexing import AnnotationConfig, BuildIndexConfig, ChunkingConfig, DependencyGraphConfig
+from rag.config.indexing import (
+    AnnotationConfig,
+    BuildIndexConfig,
+    ChunkingConfig,
+    DependencyGraphConfig,
+    SituatingContextConfig,
+)
 from rag.config.retrieval import (
     AnswerGenerationConfig,
     DependencyRecallConfig,
@@ -25,4 +31,5 @@ __all__ = [
     "RetrievalRankingConfig",
     "RetrievalRewriteConfig",
     "RetrievalRouteConfig",
+    "SituatingContextConfig",
 ]

@@ -15,7 +15,7 @@ import logging
 import quopri
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
@@ -24,6 +24,7 @@ from typing import Iterable
 
 from bs4 import BeautifulSoup, Comment
 
+from rag.config.common import default_storage_dir, resolve_project_path
 from rag.shared.logging_utils import configure_console_logging, log_phase
 
 
@@ -52,9 +53,15 @@ class PreprocessConfig:
     input_dir: Path
     html_dir: Path
     markdown_dir: Path
-    image_dir: Path = Path("./storage/cleaned_assets")
+    image_dir: Path = field(default_factory=lambda: default_storage_dir() / "cleaned_assets")
     recursive: bool = True
     soffice_path: str | None = None
+
+    def __post_init__(self) -> None:
+        # 输出目录按项目根解析，避免在 rag/cli 下运行时写到 rag/cli/storage。
+        object.__setattr__(self, "html_dir", resolve_project_path(self.html_dir))
+        object.__setattr__(self, "markdown_dir", resolve_project_path(self.markdown_dir))
+        object.__setattr__(self, "image_dir", resolve_project_path(self.image_dir))
 
 
 @dataclass(frozen=True)
@@ -473,11 +480,12 @@ def write_source_manifest(markdown_root: Path, records: list[dict[str, str]]) ->
 
 
 def parse_args() -> argparse.Namespace:
+    storage = default_storage_dir()
     parser = argparse.ArgumentParser(description="清洗 doc/docx 并生成 Markdown 文档")
-    parser.add_argument("--input-dir", default="C:/Users/heyuqin/Desktop/RAG_DATA", help="原始 doc/docx 文档目录")
-    parser.add_argument("--html-dir", default="./storage/converted_html", help="中间 HTML 输出目录")
-    parser.add_argument("--markdown-dir", default="./storage/cleaned_markdown", help="清洗后 Markdown 输出目录")
-    parser.add_argument("--image-dir", default="./storage/cleaned_assets", help="提取图片资产输出目录")
+    parser.add_argument("--input-dir", default=str(storage / "wiki-export"), help="原始 doc/docx 文档目录")
+    parser.add_argument("--html-dir", default=str(storage / "converted_html"), help="中间 HTML 输出目录，位于项目 storage 下")
+    parser.add_argument("--markdown-dir", default=str(storage / "cleaned_markdown"), help="清洗后 Markdown 输出目录，位于项目 storage 下")
+    parser.add_argument("--image-dir", default=str(storage / "cleaned_assets"), help="提取图片资产输出目录，位于项目 storage 下")
     parser.add_argument("--soffice-path", default=None, help="LibreOffice soffice.exe 路径")
     parser.add_argument("--no-recursive", action="store_true", help="仅处理输入目录一级文件")
     return parser.parse_args()

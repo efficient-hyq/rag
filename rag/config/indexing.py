@@ -34,6 +34,16 @@ class AnnotationConfig:
 
 
 @dataclass(frozen=True)
+class SituatingContextConfig:
+    """片段定位上下文配置。模型名只从环境变量读取，不另补默认模型。"""
+
+    model: str | None = None
+    workers: int = 4
+    prompt_path: Path = Path("prompts/chunk_context.md")
+    prompt_version: str = "chunk_context_v1"
+
+
+@dataclass(frozen=True)
 class DependencyGraphConfig:
     """文档级依赖图与可选依赖向量配置。"""
 
@@ -52,6 +62,7 @@ class BuildIndexConfig:
     embedding: EmbeddingConfig
     chunking: ChunkingConfig
     annotation: AnnotationConfig
+    situating: SituatingContextConfig
     dependency: DependencyGraphConfig
 
     @classmethod
@@ -72,6 +83,12 @@ class BuildIndexConfig:
                 workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "10")),
                 prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v4.md")),
                 prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v4"),
+            ),
+            situating=SituatingContextConfig(
+                model=os.getenv("RAG_CHUNK_CONTEXT_MODEL"),
+                workers=int(os.getenv("RAG_CHUNK_CONTEXT_WORKERS", "4")),
+                prompt_path=Path(os.getenv("RAG_CHUNK_CONTEXT_PROMPT_PATH", "prompts/chunk_context.md")),
+                prompt_version=os.getenv("RAG_CHUNK_CONTEXT_PROMPT_VERSION", "chunk_context_v1"),
             ),
             dependency=DependencyGraphConfig(
                 model=os.getenv("RAG_DEPENDENCY_GRAPH_MODEL", "qwen3.6-plus"),

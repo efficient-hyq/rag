@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI
+
+from rag.indexing.chunk_context import (
+    archive_match_terms,
+    archive_path_from_relative,
+    query_terms_for_archive,
+)
 
 if TYPE_CHECKING:
     from rag.retrieval.retriever import RetrievalCandidate
@@ -113,6 +120,8 @@ class LLMReranker:
         payload = [
             {
                 "node_id": candidate.node_id,
+                "archive_path": str(candidate.metadata.get("archive_path") or ""),
+                "heading_path": str(candidate.metadata.get("heading_path") or ""),
                 "summary": str(candidate.metadata.get("summary") or ""),
                 "keywords": candidate.metadata.get("keywords", []),
                 "text": candidate.text[:400],
@@ -127,6 +136,8 @@ class LLMReranker:
                     "content": (
                         "你是 RAG 检索精排器。只返回 JSON："
                         "{\"results\": [{\"node_id\": \"...\", \"score\": 0.0}]}。"
+                        "候选里的 archive_path 是文档归档目录。问题点名了具体产品、渠道或目录时，"
+                        "归档路径不符的候选分数必须低于 0.2。"
                     ),
                 },
                 {"role": "user", "content": json.dumps({"query": query, "candidates": payload}, ensure_ascii=False)},
@@ -154,7 +165,7 @@ class DualStageReranker:
 
     def rerank(self, query: str, candidates: list["RetrievalCandidate"]) -> list["RetrievalCandidate"]:
         """执行两阶段排序；若 LLM 不可用或失败，则自动退回规则粗排结果。"""
-        coarse_ranked = self.rule_reranker.rerank(candidates)
+        coarse_ranked = apply_archive_affinity(query, self.rule_reranker.rerank(candidates))
         if not self.llm_enabled or self.llm_reranker is None or not coarse_ranked:
             return coarse_ranked
 
@@ -178,10 +189,52 @@ class DualStageReranker:
         if not llm_ranked:
             return coarse_ranked
 
-        llm_ranked.sort(key=lambda item: item.final_score, reverse=True)
+        llm_ranked = apply_archive_affinity(query, llm_ranked)
         llm_ranked_ids = {candidate.node_id for candidate in llm_ranked}
         tail = [candidate for candidate in coarse_ranked if candidate.node_id not in llm_ranked_ids]
         return llm_ranked + tail
+
+
+def apply_archive_affinity(query: str, candidates: list[Any]) -> list[Any]:
+    """问题点名了某条归档目录时，抬高该目录并压低同批其他目录。
+
+    没有任何候选对上目录时保持原顺序，避免泛问题被误伤。
+    """
+    query_terms = query_terms_for_archive(query)
+    if not query_terms or not candidates:
+        return candidates
+    matched_flags: list[bool] = []
+    any_match = False
+    for candidate in candidates:
+        metadata = dict(getattr(candidate, "metadata", {}) or {})
+        archive = str(metadata.get("archive_path") or "")
+        if not archive:
+            archive = archive_path_from_relative(
+                str(metadata.get("markdown_relative_path") or metadata.get("doc_id") or "")
+            )
+        matched = bool(query_terms & archive_match_terms(archive))
+        matched_flags.append(matched)
+        any_match = any_match or matched
+    if not any_match:
+        return candidates
+
+    boosted = 0
+    penalized = 0
+    for candidate, matched in zip(candidates, matched_flags):
+        if matched:
+            candidate.final_score += 0.35
+            boosted += 1
+        else:
+            # 压到匹配目录之下，避免支付网关这类邻近业务线进入答案。
+            candidate.final_score -= 1.0
+            penalized += 1
+    logging.getLogger("rag.ranking").info(
+        "归档路径纠偏 | query=%s | 命中=%s | 降权=%s",
+        query,
+        boosted,
+        penalized,
+    )
+    return sorted(candidates, key=lambda item: item.final_score, reverse=True)
 
 
 def _parse_query_rewrite(content: str, limit: int) -> list[str]:

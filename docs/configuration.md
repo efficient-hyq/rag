@@ -11,29 +11,31 @@
 
 当前共有：
 
-- 10 个命令行参数：预处理 6 个、离线建库 3 个、在线查询 1 个
-- 46 个唯一环境变量，其中 `RAG_DEPENDENCY_VECTOR_ENABLED` 同时影响离线建库和在线查询
+- 13 个命令行参数：预处理 6 个、图片说明与切分导出 4 个、离线建库 2 个、在线查询 1 个
+- 50 个唯一环境变量，其中 `RAG_DEPENDENCY_VECTOR_ENABLED` 同时影响离线建库和在线查询
 
 ## 1. 参数生效方式与优先级
 
-### 1.1 三个命令的配置来源
+### 1.1 四个命令的配置来源
 
 | 命令 | 命令行参数 | 环境变量 | 关键行为 |
 | --- | --- | --- | --- |
-| `python -m rag.cli.preprocess_docs` | 是 | 否 | 所有预处理路径和递归行为只从 CLI 读取 |
-| `python -m rag.cli.build_index` | 是 | 是 | CLI 的 `--docs-dir`、`--storage-dir` 始终覆盖同名环境变量 |
+| `python -m rag.cli.preprocess_docs` | 是 | 否 | 输出目录从 CLI 读取；相对路径按项目根目录解析 |
+| `python -m rag.cli.prepare_chunks` | 是 | 仅切分尺寸和可选存储目录 | 不调用标注或向量接口。省略 `--storage-dir` 时使用项目根目录下的 `storage` |
+| `python -m rag.cli.build_index` | 是 | 是 | 读取已切分 chunk。显式 `--chunks`、`--storage-dir` 覆盖默认位置；相对路径按项目根目录解析 |
 | `python -m rag.cli.answer_query` | 仅问题文本 | 是 | 查询配置全部从环境变量读取 |
 
 ### 1.2 覆盖优先级
 
 离线建库通过命令行运行时：
 
-1. `--docs-dir` 覆盖 `RAG_DOCS_DIR`
-2. `--storage-dir` 覆盖 `RAG_STORAGE_DIR`
-3. 其他建库配置从环境变量读取
-4. 未设置的环境变量使用代码默认值
+1. 显式 `--storage-dir` 覆盖 `RAG_STORAGE_DIR`
+2. 显式 `--chunks` 覆盖默认的 `storage/prepared_chunks/chunks.jsonl`
+3. 两者都省略时，存储目录使用 `RAG_STORAGE_DIR`，未设置则使用项目根目录下的 `storage`
+4. 其他建库配置从环境变量读取
+5. 未设置的环境变量使用代码默认值
 
-需要特别注意：`build_index` 的两个路径参数自身带有默认值，并且 CLI 会把默认值直接传给建库函数。因此，通过该 CLI 运行时，即使设置了 `RAG_DOCS_DIR` 或 `RAG_STORAGE_DIR`，只要没有显式传对应 CLI 参数，实际仍会使用 CLI 默认值。
+相对路径一律按项目根目录解析，不使用启动命令时的工作目录。因此在 `rag/cli` 下运行，也不会把索引写到 `rag/cli/storage`。
 
 在线查询通过命令行运行时：
 
@@ -79,10 +81,10 @@
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `--input-dir` | 路径 | `C:/Users/heyuqin/Desktop/RAG_DATA` | 原始 `.doc`、`.docx` 文档目录。目录不存在或没有支持的文件时直接失败 |
-| `--html-dir` | 路径 | `./storage/converted_html` | LibreOffice 转换后的中间 HTML 输出目录 |
-| `--markdown-dir` | 路径 | `./storage/cleaned_markdown` | 清洗后的 Markdown 输出目录，同时写入 `source_manifest.json` |
-| `--image-dir` | 路径 | `./storage/cleaned_assets` | 从文档或 MHTML 中提取的图片资产目录 |
+| `--input-dir` | 路径 | 项目 `storage/wiki-export` | 原始 `.doc`、`.docx` 文档目录。目录不存在或没有支持的文件时直接失败 |
+| `--html-dir` | 路径 | 项目 `storage/converted_html` | LibreOffice 转换后的中间 HTML 输出目录。默认是项目根目录下的绝对路径 |
+| `--markdown-dir` | 路径 | 项目 `storage/cleaned_markdown` | 清洗后的 Markdown 输出目录，同时写入 `source_manifest.json` |
+| `--image-dir` | 路径 | 项目 `storage/cleaned_assets` | 从文档或 MHTML 中提取的图片资产目录 |
 | `--soffice-path` | 路径或空 | `None` | 显式指定 `soffice.exe`；未指定时自动搜索系统命令和常见安装目录 |
 | `--no-recursive` | 开关 | `false` | 指定后只扫描输入目录一级文件；默认递归扫描所有子目录 |
 
@@ -97,10 +99,37 @@
 
 ```powershell
 .venv/Scripts/python.exe -m rag.cli.preprocess_docs `
-  --input-dir "D:/data/rag-source" `
-  --html-dir "./storage/converted_html" `
-  --markdown-dir "./storage/cleaned_markdown" `
-  --image-dir "./storage/cleaned_assets"
+  --input-dir "D:/ai/project/rag/storage/wiki-export"
+```
+
+## 3.1 图片说明与切分导出 CLI 参数
+
+命令入口：
+
+```powershell
+.venv/Scripts/python.exe -m rag.cli.prepare_chunks [参数]
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `--input-dir` | 路径 | 项目 `storage/wiki-export` | 原始 `.doc`、`.docx` 目录，传给与 `preprocess_docs` 相同的预处理函数。默认是项目根目录下的绝对路径 |
+| `--storage-dir` | 路径 | 项目根目录下的 `storage` | 预处理、图片说明、增强 Markdown 和 chunk 导出的根目录。默认是绝对路径；显式传入的相对路径按项目根目录解析 |
+| `--captions` | 路径 | `<storage-dir>/image_captions.json` | 图片中文说明。键是 Markdown 中的图片相对路径 |
+| `--skip-preprocess` | 开关 | `false` | 跳过预处理，直接使用已有 `cleaned_markdown` |
+
+切分尺寸不单独提供命令行参数，读取 `RAG_CHUNK_SIZE` 和 `RAG_CHUNK_OVERLAP`，默认分别是 `512` 和 `100`。这两个值只在 `prepare_chunks` 切分时生效。改完后需要重新导出 chunk，`build_index` 才会看到新的边界。
+
+输出固定在 `--storage-dir` 下：
+
+- `cleaned_markdown/`、`converted_html/`、`cleaned_assets/`
+- `enriched_markdown/`
+- `prepared_chunks/chunks.jsonl`
+- `prepared_chunks/report.json`
+
+示例：
+
+```powershell
+.venv/Scripts/python.exe -m rag.cli.prepare_chunks --skip-preprocess
 ```
 
 ## 4. 离线建库 CLI 参数
@@ -113,18 +142,21 @@
 
 | 参数 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `--docs-dir` | 路径 | `./storage/cleaned_markdown` | 清洗后的 Markdown 根目录；覆盖 `RAG_DOCS_DIR` |
-| `--storage-dir` | 路径 | `./storage` | 索引工作区、发布清单和最终索引根目录；覆盖 `RAG_STORAGE_DIR` |
-| `--migrate-workspace-checkpoints` | 开关 | `false` | 只迁移 `index_workspace` 中旧版 LLM 检查点，执行后退出，不构建索引 |
-
-迁移模式要求 `<storage-dir>/index_workspace` 已存在。该模式只使用 `--storage-dir`，不会读取或处理 `--docs-dir` 中的文档。
+| `--chunks` | 路径 | `<storage>/prepared_chunks/chunks.jsonl` | `prepare_chunks` 导出的 chunk 文件。建库不再扫描 Markdown，也不再切分 |
+| `--storage-dir` | 路径 | 项目根目录下的 `storage` | 索引工作区、发布清单和最终索引根目录。显式传入时覆盖 `RAG_STORAGE_DIR`；相对路径按项目根目录解析 |
 
 示例：
 
 ```powershell
+.venv/Scripts/python.exe -m rag.cli.build_index
+```
+
+指定 chunk 文件时：
+
+```powershell
 .venv/Scripts/python.exe -m rag.cli.build_index `
-  --docs-dir "./storage/cleaned_markdown" `
-  --storage-dir "./storage"
+  --chunks "storage/prepared_chunks/chunks.jsonl" `
+  --storage-dir "storage"
 ```
 
 ## 5. 在线查询 CLI 参数
@@ -151,8 +183,8 @@
 
 | 环境变量 | 类型 | 默认值 | 使用阶段 | 说明 |
 | --- | --- | --- | --- | --- |
-| `RAG_DOCS_DIR` | 路径 | `./storage/cleaned_markdown` | 离线建库 | Python API 未显式传 `docs_dir` 时使用；CLI 默认会覆盖它 |
-| `RAG_STORAGE_DIR` | 路径 | `./storage` | 离线建库、在线查询 | 查询时用于读取根 `manifest.json`；建库 CLI 默认会覆盖它 |
+| `RAG_DOCS_DIR` | 路径 | 项目 `storage/enriched_markdown`，目录不存在时用同级 `cleaned_markdown` | 在线读取原文，建库读取整篇文档 | 供 `read_chunk`、精确查找，以及建库时为片段写定位上下文。建库不按这个目录重新切分 |
+| `RAG_STORAGE_DIR` | 路径 | 项目根目录下的 `storage` | 预处理、离线建库、在线查询 | 相对路径按项目根目录解析。查询时用于读取根 `manifest.json` |
 
 ### 6.2 LLM 服务配置
 
@@ -196,8 +228,8 @@
 
 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `RAG_CHUNK_SIZE` | 整数 | `512` | 单个 chunk 的目标 token 大小；切分会尽量保持 Markdown 表格、代码块和语义块完整 |
-| `RAG_CHUNK_OVERLAP` | 整数 | `100` | 相邻 chunk 复用的目标 token 大小 |
+| `RAG_CHUNK_SIZE` | 整数 | `512` | `prepare_chunks` 使用的目标 token 大小；切分会尽量保持 Markdown 表格、代码块和语义块完整 |
+| `RAG_CHUNK_OVERLAP` | 整数 | `100` | `prepare_chunks` 中相邻 chunk 复用的目标 token 大小 |
 
 建议满足 `RAG_CHUNK_SIZE > 0` 且 `0 <= RAG_CHUNK_OVERLAP < RAG_CHUNK_SIZE`。当前代码没有集中校验这组关系，不合理值可能产生异常或不符合预期的切分结果。
 
@@ -211,6 +243,17 @@
 | `RAG_ANNOTATION_PROMPT_VERSION` | 字符串 | `annotation_v4` | 标注输出协议版本；与历史状态不一致时触发全量语义重建 |
 
 `RAG_ANNOTATION_PROMPT_VERSION` 表示输出协议兼容性，不是普通文案版本。仅修改示例或措辞时不应随意递增，否则会强制重建全部文档。
+
+### 7.2.1 片段定位上下文
+
+定位上下文在标注之前生成。标注、正文向量和 BM25 读取同一份检索文本。摘要、关键词和标签使用定位说明；依赖主题只依据正文。
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `RAG_CHUNK_CONTEXT_MODEL` | 字符串 | 无，必须设置 | 为每个 chunk 写定位上下文的模型。未设置时建库直接失败，不补默认模型 |
+| `RAG_CHUNK_CONTEXT_WORKERS` | 整数 | `4` | 并发生成定位上下文的线程数 |
+| `RAG_CHUNK_CONTEXT_PROMPT_PATH` | 路径 | `prompts/chunk_context.md` | 定位提示词。相对路径按项目根目录解析，必须包含 `{{WHOLE_DOCUMENT}}` 和 `{{CHUNK_CONTENT}}` |
+| `RAG_CHUNK_CONTEXT_PROMPT_VERSION` | 字符串 | `chunk_context_v1` | 定位提示词协议版本。变化时重新标注、重新嵌入并重建 BM25 |
 
 ### 7.3 文档依赖图
 
@@ -335,9 +378,10 @@
 
 | 参数 | 是否需要重建 | 原因 |
 | --- | --- | --- |
-| `RAG_CHUNK_SIZE`、`RAG_CHUNK_OVERLAP` | 是 | chunk 边界和 `node_id` 可能变化 |
+| `RAG_CHUNK_SIZE`、`RAG_CHUNK_OVERLAP` | 是 | 先重新执行 `prepare_chunks`。chunk 边界和 `node_id` 变化后，`build_index` 会替换受影响的 chunk |
 | `RAG_EMBEDDING_MODEL` | 是 | 向量空间变化，且查询有严格一致性校验 |
 | `RAG_ANNOTATION_PROMPT_VERSION` | 自动全量重建 | 代码按版本变化使历史标注失效 |
+| `RAG_CHUNK_CONTEXT_PROMPT_VERSION` | 自动重新标注并嵌入 | 定位说明变化后，摘要、正文向量和 BM25 一起更新 |
 | `RAG_DEPENDENCY_GRAPH_PROMPT_VERSION` | 自动全量重建 | 代码按版本变化使历史依赖图失效 |
 | `RAG_DEPENDENCY_VECTOR_ENABLED: false -> true` | 是 | 需要生成 `dependency_vec` 集合 |
 | 纯在线召回、重排、答案参数 | 否 | 不改变持久化索引内容 |
@@ -362,9 +406,7 @@ $env:RAG_CHUNK_OVERLAP = "120"
 $env:RAG_ANNOTATION_WORKERS = "8"
 $env:RAG_EMBEDDING_BATCH_SIZE = "20"
 
-.venv/Scripts/python.exe -m rag.cli.build_index `
-  --docs-dir "./storage/cleaned_markdown" `
-  --storage-dir "./storage"
+.venv/Scripts/python.exe -m rag.cli.build_index
 ```
 
 ### 14.3 关闭查询侧 LLM 增强，只保留基础召回和规则排序
@@ -396,14 +438,14 @@ $env:RAG_RERANK_FINAL_TOP_N = "8"
 ```powershell
 $env:RAG_DEPENDENCY_VECTOR_ENABLED = "true"
 
-.venv/Scripts/python.exe -m rag.cli.build_index `
-  --docs-dir "./storage/cleaned_markdown" `
-  --storage-dir "./storage"
+.venv/Scripts/python.exe -m rag.cli.build_index
 ```
 
 建库完成后，查询进程也必须保留同一环境变量值。
 
 ## 15. 主要输出位置
+
+下面的 `storage/` 都是项目根目录下的 `storage/`，不是运行脚本时所在目录。
 
 | 阶段 | 默认输出 |
 | --- | --- |
@@ -411,6 +453,9 @@ $env:RAG_DEPENDENCY_VECTOR_ENABLED = "true"
 | 清洗后 Markdown | `storage/cleaned_markdown/` |
 | 图片资产 | `storage/cleaned_assets/` |
 | 来源映射清单 | `storage/cleaned_markdown/source_manifest.json` |
+| 带图片说明的 Markdown | `storage/enriched_markdown/` |
+| 切分导出 | `storage/prepared_chunks/chunks.jsonl` |
+| 评测题 | `storage/eval/questions.jsonl` |
 | 固定建库工作区 | `storage/index_workspace/` |
 | 根发布清单 | `storage/manifest.json` |
 | 最终在线索引 | `storage/<final_index_dir>/` |
@@ -421,7 +466,7 @@ $env:RAG_DEPENDENCY_VECTOR_ENABLED = "true"
 
 1. `RAG_EMBEDDING_BATCH_SIZE` 的代码默认值是 `20`，底层单次请求上限是 `10`，两者不是同一个概念。
 2. Embedding Key 和 Base URL 当前不会从 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL` 回退。
-3. 通过 `build_index` CLI 运行时，`RAG_DOCS_DIR` 和 `RAG_STORAGE_DIR` 会被 CLI 默认值覆盖。
+3. 省略 `--storage-dir` 时使用 `RAG_STORAGE_DIR`；环境变量也未设置时，使用项目根目录下的 `storage`。`RAG_DOCS_DIR` 在建库时用来读取整篇文档并写定位上下文，不参与切分。
 4. `RAG_ANSWER_CONTEXT_TOP_K` 当前不参与实际上下文截断。
 5. 布尔值拼写错误不会报错，而会被静默当作 `false`。
 6. Query Rewrite 和答案生成的远程调用异常不会自动降级，会使本次查询失败。

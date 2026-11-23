@@ -11,6 +11,7 @@ from typing import Any
 
 from openai import OpenAI
 
+from rag.indexing.chunk_context import build_retrieval_text
 from rag.indexing.dependency_topics import normalize_dependency_topics
 from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, print_progress, text_hash
 
@@ -90,7 +91,10 @@ class SemanticAnnotator:
                     len(pending), self.max_workers, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time)))
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {executor.submit(self._annotate_with_timing, node.text): node for node in pending}
+            futures = {
+                executor.submit(self._annotate_with_timing, self._annotation_input(node)): node
+                for node in pending
+            }
             for future in as_completed(futures):
                 node = futures[future]
                 key = self._cache_key(node)
@@ -155,8 +159,18 @@ class SemanticAnnotator:
         elapsed = end - start
         return annotation, elapsed, start_ts, end_ts
 
+    def _annotation_input(self, node: Any) -> str:
+        """标注读取和正文向量、BM25 相同的检索文本。"""
+        return build_retrieval_text(
+            str(getattr(node, "text", "") or ""),
+            dict(getattr(node, "metadata", {}) or {}),
+        )
+
     def _cache_key(self, node: Any) -> str:
-        return f"{node_key(node)}|annotation|{self.prompt_version}|{self.prompt_hash}"
+        return (
+            f"{node_key(node)}|annotation|{self.prompt_version}|{self.prompt_hash}|"
+            f"{text_hash(self._annotation_input(node))}"
+        )
 
     @staticmethod
     def _apply_annotation(node: Any, annotation: dict[str, Any]) -> None:
@@ -211,7 +225,7 @@ DEFAULT_ANNOTATION_PROMPT = """
 - 只分析用户提供的单个 chunk。
 - 不改写、不续写、不拆分、不合并原文。
 - 不输出解释、Markdown、代码块或额外字段。
-- 无法判断时使用保守值，不编造原文不存在的事实。
+- 无法判断时使用保守值。摘要可以吸收定位说明里的位置和主体，但不能编造定位说明和正文都没有的事实。
 
 输出必须是一个严格 JSON 对象，字段如下：
 {
@@ -225,13 +239,14 @@ DEFAULT_ANNOTATION_PROMPT = """
 }
 
 标注规则：
-- summary 要面向检索，概括 chunk 中可回答的问题、接口、概念、约束或结论。
+- 用户消息是送去检索的文本。归档字段之前的那段话是定位说明。
+- summary 要面向检索，概括检索文本可回答的问题、接口、概念、约束或结论，并带上定位说明中的位置和主体。
 - keywords 优先选择用户可能搜索的中文词、英文术语、接口名、配置名和同义表达。
 - tags 使用稳定的主题或业务域名称，例如 RAG、向量检索、权限、支付、部署、API文档。
 - type 判断主内容类型：接口说明为 api，代码占主要内容为 code，表格占主要信息为 table，其余为 text。
 - has_code 仅在出现代码块、命令、配置片段、函数签名或 JSON/YAML 示例时为 true。
 - coherence 表示该 chunk 独立可理解程度：high 独立完整；medium 需要少量上下文；low 明显残缺、跨页断裂或只有碎片。
-- dependency_topics 由你根据原文自由概括为简短、可读的中文主题；不受固定词表约束，原文没有依据时返回空数组，不根据通用常识补充，最多 5 个。
-- dependency_topics 表示当前 chunk 提供的依赖能力证据，不表示页面类型或依赖关系类型；仅提及名词但未提供规则、配置、约束或操作证据时不要标注。
-- 通常返回 0 到 3 个 topic，优先使用原文中的稳定业务术语。
+- dependency_topics 只依据正文自由概括为简短、可读的中文主题；不受固定词表约束，正文没有依据时返回空数组，不根据定位说明或通用常识补充，最多 5 个。
+- dependency_topics 表示当前 chunk 正文提供的依赖能力证据，不表示页面类型或依赖关系类型；仅提及名词但未提供规则、配置、约束或操作证据时不要标注。
+- 通常返回 0 到 3 个 topic，优先使用正文中的稳定业务术语。
 """.strip()

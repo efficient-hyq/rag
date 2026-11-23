@@ -95,7 +95,7 @@ def embed_nodes_with_checkpoint(
     pending = [
         (node, text)
         for node, text in zip(nodes, texts)
-        if _embedding_cache_key(node, route, identity) not in embeddings_by_key
+        if _embedding_cache_key(node, route, identity, text) not in embeddings_by_key
     ]
     failed = 0
     completed = len(nodes) - len(pending)
@@ -113,10 +113,10 @@ def embed_nodes_with_checkpoint(
         except Exception as exc:
             failed += len(batch)
             logger.warning("%s向量化失败 | 批次起点=%s | 批大小=%s | error=%s", route, offset, len(batch), exc)
-            for node in batch_nodes:
+            for node, text in batch:
                 checkpoint.append_embedding(
                     route,
-                    _embedding_cache_key(node, route, identity),
+                    _embedding_cache_key(node, route, identity, text),
                     [],
                     status="failed",
                     error=str(exc),
@@ -128,8 +128,8 @@ def embed_nodes_with_checkpoint(
         if len(batch_embeddings) != len(batch_nodes):
             raise ValueError(f"{route} embedding 返回数量与批次数量不一致")
 
-        for node, embedding in zip(batch_nodes, batch_embeddings):
-            key = _embedding_cache_key(node, route, identity)
+        for node, text, embedding in zip(batch_nodes, batch_texts, batch_embeddings):
+            key = _embedding_cache_key(node, route, identity, text)
             embeddings_by_key[key] = embedding
             checkpoint.append_embedding(route, key, embedding)
             completed += 1
@@ -139,19 +139,22 @@ def embed_nodes_with_checkpoint(
 
     missing = [
         node_key(node)
-        for node in nodes
-        if _embedding_cache_key(node, route, identity) not in embeddings_by_key
+        for node, text in zip(nodes, texts)
+        if _embedding_cache_key(node, route, identity, text) not in embeddings_by_key
     ]
     if missing:
         raise RuntimeError(f"{route} 向量缺失，无法入库: {missing[:5]}")
     logger.info("%s向量化结束 | 总数=%s | 失败=%s", route, len(nodes), failed)
-    return [embeddings_by_key[_embedding_cache_key(node, route, identity)] for node in nodes]
+    return [
+        embeddings_by_key[_embedding_cache_key(node, route, identity, text)]
+        for node, text in zip(nodes, texts)
+    ]
 
 
-def _embedding_cache_key(node: object, route: str, identity: str) -> str:
+def _embedding_cache_key(node: object, route: str, identity: str, embedded_text: str) -> str:
     key = f"{node_key(node)}|embedding|{route}|{identity}"
     if route == "summary":
         metadata = dict(getattr(node, "metadata", {}) or {})
         summary = str(metadata.get("summary") or "")
         return f"{key}|summary:{text_hash(summary)}"
-    return key
+    return f"{key}|text:{text_hash(embedded_text)}"

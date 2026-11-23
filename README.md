@@ -6,7 +6,7 @@
 
 当前项目围绕两条主线构建：
 
-- 离线链路：文档预处理 -> Markdown 切分与标题路径 -> LLM 标注 -> 文档依赖图 -> 多路向量化与入库 -> 工作区校验发布
+- 离线链路：文档预处理 -> 独立切分导出 chunk -> 按 chunk 标注、上下文嵌入和向量化 -> 文档依赖图 -> 工作区校验发布
 - 在线链路：用户问题 -> Query Rewrite -> 多路召回 -> 动态 seed -> 一层必要依赖 -> 邻居扩展 -> LLM 精排 -> 答案与来源输出
 
 在线查询阶段统一使用 `qwen3.6-plus` 族模型完成改写、精排和最终答案生成。
@@ -19,22 +19,24 @@
 - 支持 Confluence MHTML 风格导出文件解析。
 - 支持 Word/Confluence 文档转 HTML、清洗 HTML、转换 Markdown。
 - 支持图片资源抽取、路径重写、来源映射清单生成。
+- 支持把已有中文图片说明写进图片同一行，再按当前切分规则导出 chunk。chunk 只保留预处理后的文档相对路径和归档目录，不保留原始 doc/docx 路径。
 
 核心文件：
 
 - [rag/preprocess/document_preprocessor.py](D:/ai/project/rag/rag/preprocess/document_preprocessor.py)
+- [rag/preprocess/image_captions.py](D:/ai/project/rag/rag/preprocess/image_captions.py)
+- [rag/preprocess/enriched_corpus.py](D:/ai/project/rag/rag/preprocess/enriched_corpus.py)
 - [rag/cli/preprocess_docs.py](D:/ai/project/rag/rag/cli/preprocess_docs.py)
+- [rag/cli/prepare_chunks.py](D:/ai/project/rag/rag/cli/prepare_chunks.py)
 
 ### 2.2 离线建库
 
-- 读取清洗后的 Markdown 文档。
-- 默认按 `cleaned_markdown` Markdown 文档做增量建库。
-- 未变化 Markdown 文档复用现有标注、向量检查点和索引元数据；只有标注或依赖图输出协议对应的 prompt 版本变化时才强制全量重建。
+- 读取 `prepare_chunks` 导出的 `prepared_chunks/chunks.jsonl`，建库阶段不再切分 Markdown。
+- 按 chunk 指纹做增量：新增和内容变化的 chunk 重新标注并嵌入，消失的 chunk 从索引删除。
+- 未变化 chunk 复用标注和向量检查点；标注或依赖图输出协议对应的 prompt 版本变化时才全量重跑。
 - 标注和依赖聚合的成功检查点按内容及 prompt 版本复用，不再把模型名作为命中条件；记录中的 `model` 字段保留实际生成模型，切换模型不会重复消耗 token。
-- 变更 Markdown 文档会先删除旧 `node_id`，再重建该文档全部 chunk。
-- 已删除 Markdown 文档会自动清理旧向量、检查点和 metadata 分片。
-- 按 Markdown 语义块进行切分，尽量避免拆断代码块和表格。
-- 由程序生成 `heading_path`，使用 LLM 为 chunk 生成摘要、关键词和自由标注的 `dependency_topics` 等语义元数据。
+- 正文向量和 BM25 使用带归档路径的上下文，用来区分同一上级目录下的不同业务线，例如 Google 订阅和支付网关。
+- 由切分阶段生成 `heading_path` 和 `archive_path`，使用 LLM 为 chunk 生成摘要、关键词和自由标注的 `dependency_topics` 等语义元数据。
 - `dependency_topics` 不使用固定注册表，只做清洗、去重和数量限制；它是可选解释信息，不参与文档增量失效或依赖边有效性判断。
 - 按单个 Markdown 文档聚合全量 node 直接依赖图，并校验文档状态、node 覆盖和关系字段。
 - 生成正文向量和摘要向量两路 embedding。
@@ -174,9 +176,10 @@ rag/
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `RAG_DOCS_DIR` | 清洗后 Markdown 目录 | `./storage/cleaned_markdown` |
-| `RAG_STORAGE_DIR` | 索引与检查点目录 | `./storage` |
+| `RAG_DOCS_DIR` | 预处理 Markdown 目录，供读取原文 | 项目 `storage/enriched_markdown`，不存在时用 `cleaned_markdown` |
+| `RAG_STORAGE_DIR` | 索引、预处理和 chunk 根目录 | 项目根目录下的 `storage` |
 | `RAG_ANNOTATOR_MODEL` | 标注模型 | `qwen3.6-plus` |
+| `RAG_CHUNK_CONTEXT_MODEL` | 片段定位上下文模型 | 无，必须设置 |
 | `RAG_DEPENDENCY_GRAPH_MODEL` | 文档依赖图聚合模型 | `qwen3.6-plus` |
 | `RAG_DEPENDENCY_RECALL_ENABLED` | 是否启用在线依赖扩展 | `True` |
 | `RAG_DEPENDENCY_VECTOR_ENABLED` | 是否生成并查询可选依赖向量 | `False` |
@@ -186,7 +189,7 @@ rag/
 | `RAG_EMBEDDING_MODEL` | 向量模型 | `text-embedding-v4` |
 | `RAG_ANSWER_ENABLED` | 是否启用答案生成 | `True` |
 
-完整参数手册见下方文档，其中包含全部 CLI 参数、46 个唯一环境变量、准确默认值、覆盖优先级、必需配置和降级行为：
+完整参数手册见下方文档，其中包含全部 CLI 参数、50 个唯一环境变量、准确默认值、覆盖优先级、必需配置和降级行为：
 
 - [docs/configuration.md](D:/ai/project/rag/docs/configuration.md)
 
@@ -197,22 +200,32 @@ rag/
 ### 6.1 预处理原始文档
 
 ```bash
-.venv/Scripts/python.exe -m rag.cli.preprocess_docs --input-dir "C:/Users/heyuqin/Desktop/RAG_DATA"
+.venv/Scripts/python.exe -m rag.cli.preprocess_docs --input-dir "D:/ai/project/rag/storage/wiki-export"
 ```
 
-### 6.2 构建离线索引
+### 6.2 写入图片说明并导出 chunk
+
+这一步不调用标注、摘要、关键词或向量接口。它复用预处理结果，把 `storage/image_captions.json` 中的中文说明接到对应图片同一行，写出 `storage/enriched_markdown/`，再按当前 `chunk_size=512`、`chunk_overlap=100` 导出 `storage/prepared_chunks/chunks.jsonl`。
+
+图片和说明放在同一行，是为了让现有按行切分不会把二者拆开。`cleaned_markdown` 保持预处理原样，重复预处理不会冲掉说明。chunk 记录包含 `node_id`、正文、`heading_path`、`chunk_index`、`token_size`、文件名、预处理文档相对路径、归档目录和图片说明，不包含原始文档路径。
+
+不传路径时，输入目录是项目 `storage/wiki-export`，存储根目录是项目根下的 `storage`。这两个默认值都是绝对路径，不随当前工作目录变化。显式传入的相对 `--storage-dir` 仍按项目根目录解析。
 
 ```bash
-.venv/Scripts/python.exe -m rag.cli.build_index --docs-dir "./storage/cleaned_markdown" --storage-dir "./storage"
+.venv/Scripts/python.exe -m rag.cli.prepare_chunks
 ```
 
-`build_index` 默认按 Markdown 文档增量执行，并始终使用固定的 `storage/index_workspace/`。新增和变更文档会整体重建，未变化文档直接复用该工作区中的标注、向量和依赖聚合检查点，删除文档会从工作区索引中排除；全部产物校验成功后才更新根 `manifest.json`，构建失败不会改变在线最终目录。旧式根目录存储首次迁移、依赖卡片不完整，或标注/依赖图输出协议对应的 prompt 版本变化时，会全量重建当前文档。自由 topic 的新增、改名或写法变化不会单独触发全量重建。
+已经完成预处理、只想重新套用图片说明时，加上 `--skip-preprocess`。
 
-已有工作区若仍使用旧版带模型 key，可先执行以下命令原地迁移检查点；该操作只修改 `storage/index_workspace/checkpoints/`，不会调用模型：
+### 6.3 构建离线索引
 
 ```bash
-.venv/Scripts/python.exe -m rag.cli.build_index --storage-dir "./storage" --migrate-workspace-checkpoints
+.venv/Scripts/python.exe -m rag.cli.build_index
 ```
+
+`build_index` 读取 `storage/prepared_chunks/chunks.jsonl`，不再扫描 Markdown，也不再切分。它先给每个 chunk 写定位上下文，再让标注、正文向量和 BM25 使用同一份检索文本，然后生成摘要向量和依赖图。摘要、关键词和标签吸收定位说明，依赖主题只依据正文。chunk 原文保持不变。运行前需要设置 `RAG_CHUNK_CONTEXT_MODEL`。存储目录同样固定在项目根目录的 `storage/index_workspace/`。未变化 chunk 复用检查点；消失的 chunk 会从工作区索引中删除。全部产物校验成功后才更新根 `manifest.json`，构建失败不会改变在线最终目录。依赖卡片不完整，或标注/依赖图输出协议对应的 prompt 版本变化时，会重跑受影响的 chunk。自由 topic 的新增、改名或写法变化不会单独触发全量重建。
+
+切换到这套 chunk 输入后，需要重新执行 `prepare_chunks` 和 `build_index`，旧的文档级索引不会自动带上归档路径。
 
 根清单示例：
 
@@ -229,7 +242,7 @@ rag/
 
 根清单同时记录建库使用的 `embedding_model`。查询服务初始化时会将当前 `RAG_EMBEDDING_MODEL` 与该值严格比较；缺失或不一致会在问题编码前直接报错，不允许跨模型向量检索。切换 Embedding 模型必须全量重建并重新发布索引。
 
-### 6.3 执行完整查询
+### 6.4 执行完整查询
 
 ```bash
 .venv/Scripts/python.exe -m rag.cli.answer_query "我要接入谷歌订阅，现在需要如何处理"
@@ -241,6 +254,15 @@ rag/
 - 最终答案
 - 引用来源（文件名、chunk 序号、node_id）
 - TopN 候选 chunk 的路由来源、分数、文件名和 chunk 序号
+
+### 6.5 测试 Agent 工具调用
+
+```bash
+.venv/Scripts/python.exe -m rag.agent.tools "我要接入谷歌订阅，现在需要如何处理"
+.venv/Scripts/python.exe -m rag.agent.tools --chat
+```
+
+这个入口调用 `search_knowledge_base`、`grep_docs`、`read_neighbors`、`get_dependencies` 和 `read_chunk`。前四个工具只返回摘要和短片段，全文通过 `read_chunk` 按需读取。`--chat` 进入多轮会话：闲聊不检索。追问会先把最近最多 8 轮用户提问交给模型，改写成可以独立检索的问题；改写失败时仍用产品名和接口名做规则补全。回答阶段只带最近 3 轮问答。会话里保存完整回答，放进上下文时才把每条截断到 400 字，并且不包含上一轮的工具调用记录。本轮工具请求和工具结果只追加在当前问题后面。历史回答不能代替本轮检索证据。系统提示词只规定角色、目标和检索边界，工具参数以工具定义为准；检索量和是否继续由模型判断，证据够了就停止。需要已设置 `DASHSCOPE_API_KEY`。模型默认使用 `RAG_ANSWER_MODEL`，也可以用环境变量 `MODEL` 覆盖。
 
 ## 7. 日志与进度
 

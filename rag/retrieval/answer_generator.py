@@ -67,7 +67,10 @@ class AnswerGenerator:
                     "content": (
                         "你是企业知识库问答助手。"
                         "你只能依据提供的参考资料回答，不允许补充资料之外的事实。"
-                        "如果资料不足，请明确回答“根据现有文档无法回答”。"
+                        "每条资料都有归档路径，表示它属于哪一条产品或业务线。"
+                        "问题如果点名了具体产品、渠道或目录，只采用归档路径相符的资料；"
+                        "归档路径不符的资料不要写进答案。"
+                        "如果相符资料不足，请明确回答“根据现有文档无法回答”。"
                         "请优先给出步骤、结论、配置项或注意事项，并在答案末尾追加“参考来源：”行。"
                     ),
                 },
@@ -87,6 +90,8 @@ class AnswerGenerator:
         contexts: list[str] = []
         for index, candidate in enumerate(candidates, start=1):
             file_name = str(candidate.metadata.get("file_name") or candidate.metadata.get("doc_id") or "unknown")
+            archive_path = str(candidate.metadata.get("archive_path") or "")
+            heading_path = str(candidate.metadata.get("heading_path") or "")
             chunk_index = candidate.metadata.get("chunk_index", "?")
             text = candidate.text.strip()[: self.max_context_chars]
             relation = "普通召回"
@@ -98,14 +103,15 @@ class AnswerGenerator:
                 topic_text = "、".join(dict.fromkeys(item for item in topics if item))
                 relation = f"依赖证据：{topic_text}" if topic_text else "依赖证据"
             contexts.append(
-                f"[来源 {index}][{relation}] file={file_name} | chunk={chunk_index} | "
-                f"node_id={candidate.node_id}\n{text}"
+                f"[来源 {index}][{relation}] 归档={archive_path} | 章节={heading_path} | "
+                f"file={file_name} | chunk={chunk_index} | node_id={candidate.node_id}\n{text}"
             )
         payload = {
             "question": question,
             "contexts": contexts,
             "answer_requirements": [
                 "基于参考资料回答，不要超出资料范围",
+                "问题点名产品或目录时，忽略归档路径不符的资料",
                 "优先输出可执行步骤或明确结论",
                 "资料不足时明确说明无法回答",
                 "最后一行输出参考来源，格式为：参考来源：文件名 chunk-x(node_id)",

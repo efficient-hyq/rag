@@ -29,3 +29,8 @@ dist/
 
 # RAG 本地索引产物
 storage/
+
+
+scripts/wiki_state.json
+scripts/wiki_export.py
+

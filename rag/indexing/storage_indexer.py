@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from rag.indexing.chunk_context import build_retrieval_text
 from rag.retrieval.tokenization import tokenize_technical_text
 
 
@@ -252,7 +253,8 @@ def sanitize_chroma_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def tokens_for_bm25(node: dict[str, Any], tokenizer: Callable[[str], list[str]]) -> list[str]:
     metadata = node["metadata"]
-    text_parts = [node["text"], node["summary"]]
+    # 关键词索引读带归档路径的上下文，用户用目录里的产品名也能命中。
+    text_parts = [build_retrieval_text(node["text"], metadata), node["summary"]]
     text_parts.extend(str(item) for item in metadata.get("keywords", []) if item)
     text_parts.extend(str(item) for item in metadata.get("tags", []) if item)
     return tokenizer(" ".join(text_parts))
@@ -269,18 +271,23 @@ def build_bm25(tokenized_corpus: list[list[str]]) -> Any:
 
 
 def doc_key_from_metadata(metadata: dict[str, Any], root_doc_dir: Path) -> str:
-    for key in ("cleaned_markdown_relative_path", "doc_id", "file_path", "filename"):
+    """用预处理后的文档相对路径作为文档键，不依赖运行时工作目录。"""
+    for key in ("markdown_relative_path", "cleaned_markdown_relative_path", "doc_id", "file_path", "filename"):
         value = metadata.get(key)
         if not value:
             continue
         raw_path = str(value).replace("\\", "/").strip()
-        if not raw_path:
+        if not raw_path or raw_path.lower() == "unknown":
             continue
         path = Path(raw_path)
-        if path.suffix.lower() != ".md" and key != "cleaned_markdown_relative_path":
+        if not path.is_absolute():
+            if ".." in path.parts:
+                continue
+            return raw_path.lower()
+        if path.suffix.lower() != ".md" and key not in {"markdown_relative_path", "cleaned_markdown_relative_path"}:
             continue
         try:
-            return path.resolve().relative_to(root_doc_dir.resolve()).as_posix().lower()
+            return path.resolve().relative_to(Path(root_doc_dir).resolve()).as_posix().lower()
         except ValueError:
             return raw_path.lower()
     return "unknown"

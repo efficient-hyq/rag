@@ -9,7 +9,12 @@ from typing import Any
 
 import chromadb
 
-from rag.retrieval.ranking import DualStageReranker, QueryRewriter, RuleBasedReranker
+from rag.retrieval.ranking import (
+    DualStageReranker,
+    QueryRewriter,
+    RuleBasedReranker,
+    apply_archive_affinity,
+)
 from rag.retrieval.dependency_recall import (
     DependencyGraphIndex,
     DependencyRecallRouter,
@@ -330,7 +335,7 @@ class HybridRetriever:
 
         candidates = aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
         logger.info("候选聚合完成 | 候选数=%s", len(candidates))
-        coarse_ranked = self.rule_reranker.rerank(candidates)
+        coarse_ranked = apply_archive_affinity(query, self.rule_reranker.rerank(candidates))
         decision = self.dependency_router.decide(query) if self.dependency_enabled else None
         dependency_expansion = None
         if decision and decision.need_dependency_recall:
@@ -406,6 +411,24 @@ class HybridRetriever:
             candidates=final_ranked,
             top_candidates=top_candidates,
         )
+
+    def search_snippets(self, query: str, top_k: int = 5) -> list[RetrievalCandidate]:
+        """单次混合召回后做规则粗排，供 Agent 搜索工具使用。
+
+        只返回粗排后的前 top_k 条。查询改写、依赖扩展、邻居扩展和 LLM 精排留给 Agent 的后续工具。
+        """
+        logger = logging.getLogger("rag.retriever")
+        if not query or not query.strip():
+            raise ValueError("query 不能为空")
+        limit = max(int(top_k), 1)
+        logger.info("片段检索开始 | query=%s | top_k=%s", query, limit)
+        query_embedding = self.embedder.get_text_embedding(query)
+        hits = self._retrieve_for_query(query, query_embedding, is_rewritten=False)
+        candidates = aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
+        ranked = apply_archive_affinity(query, self.rule_reranker.rerank(candidates))
+        selected = ranked[:limit]
+        logger.info("片段检索完成 | 命中数=%s | 候选数=%s | 返回数=%s",len(hits),len(ranked),len(selected))
+        return selected
 
     def _retrieve_for_query(
         self,

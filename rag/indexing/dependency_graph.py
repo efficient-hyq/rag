@@ -204,6 +204,7 @@ def build_aggregation_input(nodes: list[Any]) -> list[dict[str, Any]]:
             {
                 "node_id": node_key(node),
                 "chunk_index": int(metadata.get("chunk_index", 0)),
+                "archive_path": str(metadata.get("archive_path") or ""),
                 "heading_path": str(metadata.get("heading_path") or ""),
                 "summary": str(metadata.get("summary") or ""),
                 "keywords": list(metadata.get("keywords") or []),
@@ -252,6 +253,7 @@ def build_dependency_vector_records(
             vector_text = "\n".join(
                 [
                     f"当前内容：{source_metadata.get('summary') or getattr(source, 'text', '')}",
+                    f"归档：{source_metadata.get('archive_path') or ''}",
                     f"章节：{source_metadata.get('heading_path') or ''}",
                     f"依赖主题：{'、'.join(item for item in topics if item)}",
                     "相关依赖内容：" + "；".join(

@@ -35,6 +35,7 @@ class CheckpointStore:
         self.content_embeddings_path = self.root / "embeddings_content.jsonl"
         self.summary_embeddings_path = self.root / "embeddings_summary.jsonl"
         self.dependency_cards_path = self.root / "dependency_cards.jsonl"
+        self.situating_contexts_path = self.root / "situating_contexts.jsonl"
         self.manifest_path = self.root / "manifest.json"
         self.document_index_state_path = self.root / "document_index_state.json"
 
@@ -101,6 +102,7 @@ class CheckpointStore:
         self._rewrite_jsonl_without_node_keys(self.annotations_path, node_ids)
         self._rewrite_jsonl_without_node_keys(self.content_embeddings_path, node_ids)
         self._rewrite_jsonl_without_node_keys(self.summary_embeddings_path, node_ids)
+        self._rewrite_jsonl_without_node_keys(self.situating_contexts_path, node_ids)
 
     def load_annotations(self) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
@@ -122,6 +124,30 @@ class CheckpointStore:
                 "key": key,
                 "status": status,
                 "annotation": annotation,
+                "error": error,
+            },
+        )
+
+    def load_situating_contexts(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for key, record in self._load_jsonl_by_key(self.situating_contexts_path).items():
+            if record.get("status") == "success" and str(record.get("context") or "").strip():
+                result[key] = str(record["context"])
+        return result
+
+    def append_situating_context(
+        self,
+        key: str,
+        context: str,
+        status: str = "success",
+        error: str | None = None,
+    ) -> None:
+        self._upsert_jsonl(
+            self.situating_contexts_path,
+            {
+                "key": key,
+                "status": status,
+                "context": context,
                 "error": error,
             },
         )

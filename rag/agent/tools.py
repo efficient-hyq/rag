@@ -22,7 +22,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "在知识库中查找与问题相关的片段。query 使用适合检索的短查询，可以是用户原问题，也可以是拆出的产品名、接口名或错误码。每条结果只含 node_id、文件名、heading_path、摘要和不超过 200 字的片段，不含全文。没有命中时返回空列表。摘要不够回答时，再用 node_id 调用 read_chunk。",
+            "description": "在知识库中查找与问题相关的片段。query 使用适合检索的短查询，可以是用户原问题，也可以是拆出的产品名、接口名或错误码。每条结果只含 node_id、文件名、归档路径、heading_path、摘要和不超过 200 字的片段，不含全文。归档路径用于区分产品线，例如谷歌订阅和支付网关。没有命中时返回空列表。摘要不够回答时，再用 node_id 调用 read_chunk。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -255,7 +255,7 @@ def search_knowledge_base(query: str, top_k: int = DEFAULT_TOP_K) -> str:
 @lru_cache(maxsize=1)
 def _get_query_config() -> QueryConfig:
     config = QueryConfig.from_env()
-    storage_dir = resolve_storage_dir(os.getenv("RAG_STORAGE_DIR"),config.paths.storage_dir,_bundled_storage_dir())
+    storage_dir = resolve_storage_dir(os.getenv("RAG_STORAGE_DIR"), config.paths.storage_dir)
     docs_dir = resolve_docs_dir(os.getenv("RAG_DOCS_DIR"), storage_dir, _project_docs_dir())
     return replace(config, paths=PathConfig(docs_dir=docs_dir, storage_dir=storage_dir))
 
@@ -270,53 +270,45 @@ def _get_docs_dir() -> Path:
     return _get_query_config().paths.docs_dir
 
 
-def resolve_storage_dir(env_value: str | None, default: Path, bundled: Path) -> Path:
-    """选择包含 manifest.json 的索引根目录。
+def resolve_storage_dir(env_value: str | None, default: Path) -> Path:
+    """选择索引根目录。相对路径按项目根目录解析，不随启动目录变化。"""
+    from rag.config.common import resolve_project_path
 
-    显式设置 RAG_STORAGE_DIR 时使用该值。否则默认的 ./storage 没有发布清单时，
-    使用包内 cli/storage。这样不必把绝对路径写进源码。
-    """
-    if env_value:
-        return Path(env_value)
-    if _has_manifest(default):
-        return default
-    if _has_manifest(bundled):
-        return bundled
-    return default
+    if env_value and str(env_value).strip():
+        return resolve_project_path(env_value)
+    return Path(default)
 
 
 def resolve_docs_dir(env_value: str | None, storage_dir: Path, project_docs_dir: Path) -> Path:
-    """选择清洗后 Markdown 的根目录，供相对路径校验。"""
-    if env_value:
-        return Path(env_value)
-    sibling = storage_dir / "cleaned_markdown"
-    if sibling.is_dir():
-        return sibling
+    """选择预处理 Markdown 的根目录，供相对路径校验。优先带图片说明的目录。"""
+    from rag.config.common import resolve_project_path
+
+    if env_value and str(env_value).strip():
+        return resolve_project_path(env_value)
+    enriched = storage_dir / "enriched_markdown"
+    if enriched.is_dir():
+        return enriched
+    cleaned = storage_dir / "cleaned_markdown"
+    if cleaned.is_dir():
+        return cleaned
     if project_docs_dir.is_dir():
         return project_docs_dir
-    return project_docs_dir
-
-
-def _bundled_storage_dir() -> Path:
-    return Path(__file__).resolve().parents[1] / "cli" / "storage"
+    return enriched
 
 
 def _project_docs_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "storage" / "cleaned_markdown"
+    from rag.config.common import project_root
 
-
-def _has_manifest(path: Path) -> bool:
-    return (path / "manifest.json").is_file()
+    return project_root() / "storage" / "enriched_markdown"
 
 
 def chunk_file_path(metadata: dict[str, object], docs_dir: Path) -> str:
-    """返回清洗后 Markdown 文件的绝对路径。
+    """返回预处理 Markdown 文件的绝对路径。
 
-    索引里的 file_path、doc_id、cleaned_markdown_path 依赖建库时的工作目录。
-    source_absolute_path 指向原始 doc。这里先把清洗后的相对位置收敛到文档根目录内，再解析成绝对路径。
+    新索引使用 markdown_relative_path。旧索引仍可能只有 cleaned_markdown_relative_path。
     """
     root = docs_dir.resolve()
-    stored = _safe_relative(metadata.get("cleaned_markdown_relative_path"))
+    stored = _stored_markdown_relative(metadata)
     if stored:
         candidate = (root / stored).resolve()
         if _is_under(candidate, root):
@@ -326,6 +318,14 @@ def chunk_file_path(metadata: dict[str, object], docs_dir: Path) -> str:
     if resolved is None:
         return ""
     return str(resolved)
+
+
+def _stored_markdown_relative(metadata: dict[str, object]) -> str:
+    for key in ("markdown_relative_path", "cleaned_markdown_relative_path"):
+        stored = _safe_relative(metadata.get(key))
+        if stored:
+            return stored
+    return ""
 
 
 def _safe_relative(value: object) -> str:
@@ -403,6 +403,7 @@ def _summary_view(node_id: str, metadata: dict[str, object]) -> dict[str, str]:
     return {
         "node_id": node_id,
         "file_name": str(metadata.get("file_name") or ""),
+        "archive_path": str(metadata.get("archive_path") or ""),
         "heading_path": str(metadata.get("heading_path") or ""),
         "summary": str(metadata.get("summary") or ""),
         "snippet": str(metadata.get("text") or "")[:SNIPPET_CHARS],
@@ -443,7 +444,7 @@ def _grep_markdown(
 ) -> tuple[list[dict[str, object]], int, int | None]:
     grouped: dict[str, list[tuple[str, dict[str, object]]]] = {}
     for node_id, metadata in metadata_index.metadata_by_id.items():
-        relative = _safe_relative(metadata.get("cleaned_markdown_relative_path"))
+        relative = _stored_markdown_relative(metadata)
         if not relative:
             continue
         grouped.setdefault(relative, []).append((str(node_id), metadata))

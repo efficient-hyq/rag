@@ -24,7 +24,13 @@ EMPTY_ANNOTATION = {
     "has_code": False,
     "coherence": "medium",
     "dependency_topics": [],
+    "subject": {"kind": "其他", "title": "", "identifiers": []},
+    "stated_rules": [],
 }
+
+SUBJECT_KINDS = {"接口", "配置", "流程", "规则", "错误码", "其他"}
+MAX_SUBJECT_IDENTIFIERS = 8
+MAX_STATED_RULES = 3
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,7 @@ class SemanticAnnotator:
         max_retries: int = 3,
         client: OpenAI | None = None,
         prompt: str | None = None,
-        prompt_version: str = "annotation_v4",
+        prompt_version: str = "annotation_v5",
     ) -> None:
         if not api_key and client is None:
             raise ValueError("缺少 LLM API Key，请设置 DASHSCOPE_API_KEY")
@@ -92,7 +98,12 @@ class SemanticAnnotator:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(self._annotate_with_timing, self._annotation_input(node)): node
+                executor.submit(
+                    self._annotate_with_timing,
+                    self._annotation_input(node),
+                    str(getattr(node, "text", "") or ""),
+                    str((getattr(node, "metadata", {}) or {}).get("heading_path") or ""),
+                ): node
                 for node in pending
             }
             for future in as_completed(futures):
@@ -105,7 +116,7 @@ class SemanticAnnotator:
                     logger.info("标注成功 | node_id=%s | 耗时=%.2fs | 开始=%s | 结束=%s",
                                 node.id_, elapsed, start_ts, end_ts)
                 except Exception as exc:
-                    annotation = dict(EMPTY_ANNOTATION)
+                    annotation = normalize_annotation({})
                     status = "failed"
                     error = str(exc)
                     failed += 1
@@ -126,7 +137,7 @@ class SemanticAnnotator:
                     time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time)))
         return AnnotationRunResult(nodes=nodes, failed_keys=failed_keys)
 
-    def annotate_text(self, text: str) -> dict[str, Any]:
+    def annotate_text(self, text: str, *, source_text: str = "", heading_path: str = "") -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
@@ -139,7 +150,11 @@ class SemanticAnnotator:
                     temperature=0,
                 )
                 content = response.choices[0].message.content or ""
-                return normalize_annotation(parse_json_object(content))
+                return normalize_annotation(
+                    parse_json_object(content),
+                    source_text=source_text or text,
+                    heading_path=heading_path,
+                )
             except Exception as exc:
                 last_error = exc
                 if attempt == self.max_retries - 1:
@@ -149,11 +164,16 @@ class SemanticAnnotator:
             raise last_error
         return dict(EMPTY_ANNOTATION)
 
-    def _annotate_with_timing(self, text: str) -> tuple[dict[str, Any], float, str, str]:
+    def _annotate_with_timing(
+        self,
+        text: str,
+        source_text: str,
+        heading_path: str,
+    ) -> tuple[dict[str, Any], float, str, str]:
         """带计时的标注方法，返回 (annotation, elapsed_time, start_time, end_time)。"""
         start = time.time()
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start))
-        annotation = self.annotate_text(text)
+        annotation = self.annotate_text(text, source_text=source_text, heading_path=heading_path)
         end = time.time()
         end_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end))
         elapsed = end - start
@@ -187,7 +207,12 @@ def parse_json_object(content: str) -> dict[str, Any]:
     return json.loads(cleaned)
 
 
-def normalize_annotation(raw: dict[str, Any]) -> dict[str, Any]:
+def normalize_annotation(
+    raw: dict[str, Any],
+    *,
+    source_text: str = "",
+    heading_path: str = "",
+) -> dict[str, Any]:
     annotation = dict(EMPTY_ANNOTATION)
     annotation.update(raw)
     annotation["summary"] = str(annotation.get("summary") or "")[:50]
@@ -197,11 +222,13 @@ def normalize_annotation(raw: dict[str, Any]) -> dict[str, Any]:
     annotation["has_code"] = bool(annotation.get("has_code"))
     annotation["coherence"] = _enum(annotation.get("coherence"), {"high", "medium", "low"}, "medium")
     annotation["dependency_topics"] = normalize_dependency_topics(annotation.get("dependency_topics"))
+    annotation["subject"] = _normalize_subject(raw.get("subject"), source_text, heading_path)
+    annotation["stated_rules"] = _normalize_stated_rules(raw.get("stated_rules"), source_text)
     return annotation
 
 
 def load_annotation_prompt(path: str | Path | None = None) -> str:
-    prompt_path = Path(path) if path is not None else Path("prompts/annotation_v4.md")
+    prompt_path = Path(path) if path is not None else Path("prompts/annotation_v5.md")
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8").strip()
     return DEFAULT_ANNOTATION_PROMPT
@@ -216,6 +243,74 @@ def _string_list(value: Any, limit: int) -> list[str]:
 def _enum(value: Any, allowed: set[str], default: str) -> str:
     text = str(value or default).strip().lower()
     return text if text in allowed else default
+
+
+def _normalize_subject(raw: Any, source_text: str, heading_path: str) -> dict[str, Any]:
+    """整理当前段身份。具体名字必须能在正文或标题里原样找到。"""
+    payload = raw if isinstance(raw, dict) else {}
+    kind = str(payload.get("kind") or "其他").strip()
+    if kind not in SUBJECT_KINDS:
+        kind = "其他"
+    return {
+        "kind": kind,
+        "title": str(payload.get("title") or "").strip()[:80],
+        "identifiers": _grounded_identifiers(
+            payload.get("identifiers"),
+            f"{source_text}\n{heading_path}",
+            MAX_SUBJECT_IDENTIFIERS,
+        ),
+    }
+
+
+def _normalize_stated_rules(raw: Any, source_text: str) -> list[dict[str, Any]]:
+    """只保留依据能在当前正文中原样找到的规矩。"""
+    if not isinstance(raw, list) or not source_text:
+        return []
+    rules: list[dict[str, Any]] = []
+    for item in raw:
+        if len(rules) >= MAX_STATED_RULES or not isinstance(item, dict):
+            continue
+        evidence = str(item.get("evidence") or "").strip()
+        requirement = str(item.get("requirement") or "").strip()
+        applies_to = str(item.get("applies_to") or "").strip()
+        required = item.get("required")
+        if (
+            not evidence
+            or evidence not in source_text
+            or len(evidence) > 200
+            or not requirement
+            or requirement not in source_text
+            or not applies_to
+            or applies_to not in source_text
+            or not isinstance(required, bool)
+        ):
+            continue
+        rules.append(
+            {
+                "requirement": requirement[:80],
+                "applies_to": applies_to[:120],
+                "required": required,
+                "identifiers": _grounded_identifiers(item.get("identifiers"), source_text, MAX_SUBJECT_IDENTIFIERS),
+                "evidence": evidence,
+            }
+        )
+    return rules
+
+
+def _grounded_identifiers(value: Any, source: str, limit: int) -> list[str]:
+    if not isinstance(value, list) or not source.strip():
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        token = str(item or "").strip()
+        key = token.casefold()
+        if token and token in source and key not in seen:
+            result.append(token[:80])
+            seen.add(key)
+            if len(result) >= limit:
+                break
+    return result
 
 
 DEFAULT_ANNOTATION_PROMPT = """
@@ -235,7 +330,9 @@ DEFAULT_ANNOTATION_PROMPT = """
   "type": "text|api|code|table",
   "has_code": true,
   "coherence": "high|medium|low",
-  "dependency_topics": ["LLM 自由概括的简短依赖主题，最多 5 个"]
+  "dependency_topics": ["LLM 自由概括的简短依赖主题，最多 5 个"],
+  "subject": {"kind": "接口|配置|流程|规则|错误码|其他", "title": "这段自己的标题", "identifiers": []},
+  "stated_rules": []
 }
 
 标注规则：
@@ -249,4 +346,7 @@ DEFAULT_ANNOTATION_PROMPT = """
 - dependency_topics 只依据正文自由概括为简短、可读的中文主题；不受固定词表约束，正文没有依据时返回空数组，不根据定位说明或通用常识补充，最多 5 个。
 - dependency_topics 表示当前 chunk 正文提供的依赖能力证据，不表示页面类型或依赖关系类型；仅提及名词但未提供规则、配置、约束或操作证据时不要标注。
 - 通常返回 0 到 3 个 topic，优先使用正文中的稳定业务术语。
+- subject 描述当前 chunk 自己是什么。kind 只能取接口、配置、流程、规则、错误码、其他。identifiers 必须是正文或标题中的连续原文。
+- stated_rules 只在正文规定了别人时填写。requirement、applies_to、evidence、identifiers 都必须是正文中的连续原文。没有规矩时返回空数组。
+- 不要输出 chunk 之间的依赖边。
 """.strip()

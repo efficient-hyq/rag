@@ -29,8 +29,8 @@ class AnnotationConfig:
 
     model: str = "qwen3.6-plus"
     workers: int = 10
-    prompt_path: Path = Path("prompts/annotation_v4.md")
-    prompt_version: str = "annotation_v4"
+    prompt_path: Path = Path("prompts/annotation_v5.md")
+    prompt_version: str = "annotation_v5"
 
 
 @dataclass(frozen=True)
@@ -48,8 +48,8 @@ class DependencyGraphConfig:
     """文档级依赖图与可选依赖向量配置。"""
 
     model: str = "qwen3.6-plus"
-    prompt_path: Path = Path("prompts/dependency_graph_v3.md")
-    prompt_version: str = "dependency_graph_v3"
+    prompt_path: Path = Path("prompts/dependency_graph_v5.md")
+    prompt_version: str = "dependency_graph_v5"
     vector_enabled: bool = False
 
 
@@ -81,8 +81,8 @@ class BuildIndexConfig:
             annotation=AnnotationConfig(
                 model=os.getenv("RAG_ANNOTATOR_MODEL"),
                 workers=int(os.getenv("RAG_ANNOTATION_WORKERS", "10")),
-                prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v4.md")),
-                prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v4"),
+                prompt_path=Path(os.getenv("RAG_ANNOTATION_PROMPT_PATH", "prompts/annotation_v5.md")),
+                prompt_version=os.getenv("RAG_ANNOTATION_PROMPT_VERSION", "annotation_v5"),
             ),
             situating=SituatingContextConfig(
                 model=os.getenv("RAG_CHUNK_CONTEXT_MODEL"),
@@ -92,8 +92,8 @@ class BuildIndexConfig:
             ),
             dependency=DependencyGraphConfig(
                 model=os.getenv("RAG_DEPENDENCY_GRAPH_MODEL", "qwen3.6-plus"),
-                prompt_path=Path(os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_PATH", "prompts/dependency_graph_v4.md")),
-                prompt_version=os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_VERSION","dependency_graph_v4",),
+                prompt_path=Path(os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_PATH", "prompts/dependency_graph_v5.md")),
+                prompt_version=os.getenv("RAG_DEPENDENCY_GRAPH_PROMPT_VERSION", "dependency_graph_v5"),
                 vector_enabled=get_bool_env("RAG_DEPENDENCY_VECTOR_ENABLED", False),
             ),
         )

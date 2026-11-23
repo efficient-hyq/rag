@@ -19,7 +19,7 @@ from rag.shared.checkpoints import CheckpointStore, ProgressSnapshot, node_key, 
 
 
 DEPENDENCY_SCHEMA_VERSION = "dependency_graph_v4"
-DEFAULT_DEPENDENCY_PROMPT_VERSION = "dependency_graph_v4"
+DEFAULT_DEPENDENCY_PROMPT_VERSION = "dependency_graph_v5"
 
 
 @dataclass(frozen=True)
@@ -106,17 +106,67 @@ class DocumentDependencyAggregator:
         nodes: list[Any],
         doc_content_hash: str,
     ) -> dict[str, Any]:
-        payload = build_aggregation_input(nodes)
-        node_ids = [item["node_id"] for item in payload]
-        if not node_ids or any(not item["text"].strip() for item in payload):
+        notes = build_dependency_notes(nodes)
+        node_ids = [item["node_id"] for item in notes]
+        if not node_ids or any(not item for item in node_ids):
             return build_failed_document_card(
                 doc_content_hash,
                 len(node_ids),
                 self.model,
                 self.prompt_version,
-                "聚合输入缺少 node 或完整 chunk text",
+                "聚合输入缺少 node",
             )
 
+        batches = iter_note_batches(notes)
+        logger = logging.getLogger("rag.dependency_graph")
+        if not batches:
+            logger.info("依赖整理跳过模型 | 文档=%s | 段落=%s | 原因=没有规矩", doc_key, len(notes))
+            return build_note_document_card(
+                [],
+                node_ids,
+                doc_content_hash,
+                self.model,
+                self.prompt_version,
+            )
+
+        collected: list[list[tuple[str, dict[str, Any]]]] = []
+        last_error: Exception | None = None
+        for index, batch in enumerate(batches, start=1):
+            edges, error = self._request_note_edges(doc_key, batch)
+            if error is not None:
+                last_error = error
+                logger.warning(
+                    "依赖整理失败 | 文档=%s | 批次=%s/%s | error=%s",
+                    doc_key,
+                    index,
+                    len(batches),
+                    error,
+                )
+                break
+            collected.append(edges)
+        if last_error is not None:
+            return build_failed_document_card(
+                doc_content_hash,
+                len(node_ids),
+                self.model,
+                self.prompt_version,
+                str(last_error),
+            )
+        logger.info("依赖整理完成 | 文档=%s | 段落=%s | 请求=%s", doc_key, len(notes), len(batches))
+        return build_note_document_card(
+            merge_note_edges(collected),
+            node_ids,
+            doc_content_hash,
+            self.model,
+            self.prompt_version,
+        )
+
+    def _request_note_edges(
+        self,
+        doc_key: str,
+        batch: dict[str, Any],
+    ) -> tuple[list[tuple[str, dict[str, Any]]], Exception | None]:
+        payload = {"doc_id": doc_key, **batch}
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
@@ -124,36 +174,17 @@ class DocumentDependencyAggregator:
                     model=self.model,
                     messages=[
                         {"role": "system", "content": self.prompt},
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                {"doc_id": doc_key, "nodes": payload},
-                                ensure_ascii=False,
-                            ),
-                        },
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
                     temperature=0,
                 )
                 content = response.choices[0].message.content or ""
-                raw = parse_json_object(content)
-                return validate_dependency_document(
-                    raw,
-                    node_ids,
-                    doc_content_hash,
-                    self.model,
-                    self.prompt_version,
-                )
+                return extract_note_edges(parse_json_object(content)), None
             except Exception as exc:
                 last_error = exc
                 if attempt < self.max_retries - 1:
                     time.sleep(2**attempt)
-        return build_failed_document_card(
-            doc_content_hash,
-            len(node_ids),
-            self.model,
-            self.prompt_version,
-            str(last_error or "依赖聚合失败"),
-        )
+        return [], last_error or RuntimeError("依赖整理失败")
 
     def _cache_key(self, doc_key: str, doc_hash: str) -> str:
         return f"{doc_key}|{doc_hash}|{self.prompt_version}|{self.prompt_hash}"
@@ -194,6 +225,117 @@ class DependencyCardStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return payload
+
+
+def build_dependency_notes(nodes: list[Any]) -> list[dict[str, Any]]:
+    """把标注好的身份和规矩收成依赖整理输入，不带正文全文。"""
+    ordered = sorted(nodes, key=lambda item: int((getattr(item, "metadata", {}) or {}).get("chunk_index", 0)))
+    notes: list[dict[str, Any]] = []
+    for node in ordered:
+        metadata = dict(getattr(node, "metadata", {}) or {})
+        subject = metadata.get("subject") if isinstance(metadata.get("subject"), dict) else {}
+        rules = metadata.get("stated_rules") if isinstance(metadata.get("stated_rules"), list) else []
+        notes.append(
+            {
+                "node_id": node_key(node),
+                "heading_path": str(metadata.get("heading_path") or ""),
+                "subject": {
+                    "kind": str(subject.get("kind") or "其他"),
+                    "title": str(subject.get("title") or ""),
+                    "identifiers": [str(item) for item in subject.get("identifiers") or [] if str(item).strip()],
+                },
+                "stated_rules": [dict(rule) for rule in rules if isinstance(rule, dict)],
+            }
+        )
+    return notes
+
+
+def iter_note_batches(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """有规矩时一次送出整篇文档的笔记。没有规矩时不请求模型。"""
+    has_rule = any(
+        isinstance(rule, dict)
+        for note in notes
+        for rule in note.get("stated_rules") or []
+    )
+    if not has_rule:
+        return []
+    return [{"chunks": notes}]
+
+
+def extract_note_edges(raw: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    dependencies = raw.get("node_dependencies") if isinstance(raw, dict) else None
+    if not isinstance(dependencies, dict):
+        raise ValueError("LLM 输出缺少 node_dependencies 对象")
+    edges: list[tuple[str, dict[str, Any]]] = []
+    for source_id, raw_edges in dependencies.items():
+        if not isinstance(raw_edges, list):
+            continue
+        for raw_edge in raw_edges:
+            edge = normalize_relation_edge(raw_edge)
+            if edge is not None:
+                edges.append((str(source_id), edge))
+    return edges
+
+
+def merge_note_edges(
+    groups: list[list[tuple[str, dict[str, Any]]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """合并分批结果。同一对段落保留置信度更高的一条边。"""
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for group in groups:
+        for source_id, edge in group:
+            key = (source_id, str(edge.get("node_id") or ""))
+            current = best.get(key)
+            if current is None:
+                best[key] = edge
+                order.append(key)
+            elif float(edge.get("confidence") or 0) > float(current.get("confidence") or 0):
+                best[key] = edge
+    return [(key[0], best[key]) for key in order]
+
+
+def assemble_note_dependencies(
+    edges: list[tuple[str, dict[str, Any]]],
+    node_ids: list[str],
+) -> tuple[dict[str, list[dict[str, Any]]], int]:
+    """丢弃越界边和自环，并为没有边的段落补空数组。"""
+    node_id_set = set(node_ids)
+    dependencies: dict[str, list[dict[str, Any]]] = {node_id: [] for node_id in node_ids}
+    seen: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    discarded = 0
+    for source_id, edge in edges:
+        target = str(edge.get("node_id") or "")
+        if source_id not in node_id_set or target not in node_id_set or target == source_id or target in seen[source_id]:
+            discarded += 1
+            continue
+        dependencies[source_id].append(edge)
+        seen[source_id].add(target)
+    return dependencies, discarded
+
+
+def build_note_document_card(
+    edges: list[tuple[str, dict[str, Any]]],
+    node_ids: list[str],
+    doc_content_hash: str,
+    model: str,
+    prompt_version: str,
+) -> dict[str, Any]:
+    dependencies, discarded = assemble_note_dependencies(edges, node_ids)
+    if discarded:
+        logging.getLogger("rag.dependency_graph").warning("依赖边校验丢弃 | 数量=%s", discarded)
+    return {
+        "status": "success",
+        "doc_content_hash": doc_content_hash,
+        "expected_node_count": len(node_ids),
+        "processed_node_count": len(node_ids),
+        "model": model,
+        "prompt_version": prompt_version,
+        "generated_at": utc_now(),
+        "error": None,
+        "discarded_edge_count": discarded,
+        "node_dependencies": dependencies,
+    }
 
 
 def build_aggregation_input(nodes: list[Any]) -> list[dict[str, Any]]:
@@ -371,7 +513,7 @@ def parse_json_object(content: str) -> dict[str, Any]:
 
 
 def load_dependency_prompt(path: str | Path | None = None) -> str:
-    prompt_path = Path(path) if path is not None else Path("prompts/dependency_graph_v4.md")
+    prompt_path = Path(path) if path is not None else Path("prompts/dependency_graph_v5.md")
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8").strip()
     return DEFAULT_DEPENDENCY_PROMPT
@@ -382,12 +524,13 @@ def utc_now() -> str:
 
 
 DEFAULT_DEPENDENCY_PROMPT = """
-你是文档内部直接依赖关系聚合器。输入只包含一个 Markdown 文档的全部 chunk。
-只依据 chunk 完整原文建立直接依赖，无法确认时输出空数组，不使用通用常识补充。
-依赖双方必须是输入中的 node_id，不允许自身依赖、重复边或跨文档关系。
+你是文档内部依赖整理器。输入只包含同一篇文档的标注笔记，不包含各段全文。
+subject 描述这段是什么，stated_rules 是这段替别人定下的规矩。
+chunks 是这篇文档的全部笔记，整理其中每一条规矩。
+被约束的段落指向规矩所在段落。用种类、标题、路径、配置键和适用范围判断是否覆盖。
+无法确认时不要连边。不允许自己依赖自己或使用不存在的 node_id。
 relation_type 只能取 prerequisite、constraint、failure_handling、follow_up。
 每条边必须包含 node_id、relation_type、required、0 到 1 的 confidence 和非空 reason。
-topic 是可选的自由文本说明；不得因为 topic 为空或与已有标注不同而丢弃依赖边。
-follow_up 通常 required=false。只返回严格 JSON：{"node_dependencies": {"node-id": []}}。
-每个输入 node_id 都必须作为 node_dependencies 的 key 出现，无依赖时值为 []。
+reason 必须引用规矩的 evidence。只输出有边的 source。
+只返回严格 JSON：{"node_dependencies": {"source-node-id": []}}。
 """.strip()

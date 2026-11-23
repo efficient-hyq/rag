@@ -239,8 +239,8 @@
 | --- | --- | --- | --- |
 | `RAG_ANNOTATOR_MODEL` | 字符串 | `qwen3.6-plus` | 离线 chunk 语义标注模型 |
 | `RAG_ANNOTATION_WORKERS` | 整数 | `5` | 并发标注线程数，应大于 `0` |
-| `RAG_ANNOTATION_PROMPT_PATH` | 路径 | `prompts/annotation_v4.md` | 标注提示词文件；文件不存在时使用代码内置提示词 |
-| `RAG_ANNOTATION_PROMPT_VERSION` | 字符串 | `annotation_v4` | 标注输出协议版本；与历史状态不一致时触发全量语义重建 |
+| `RAG_ANNOTATION_PROMPT_PATH` | 路径 | `prompts/annotation_v5.md` | 标注提示词文件；文件不存在时使用代码内置提示词 |
+| `RAG_ANNOTATION_PROMPT_VERSION` | 字符串 | `annotation_v5` | 标注输出协议版本。变化时重新标注。v5 起每段额外记录 `subject` 和 `stated_rules` |
 
 `RAG_ANNOTATION_PROMPT_VERSION` 表示输出协议兼容性，不是普通文案版本。仅修改示例或措辞时不应随意递增，否则会强制重建全部文档。
 
@@ -260,8 +260,8 @@
 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `RAG_DEPENDENCY_GRAPH_MODEL` | 字符串 | `qwen3.6-plus` | 离线文档级依赖图聚合模型 |
-| `RAG_DEPENDENCY_GRAPH_PROMPT_PATH` | 路径 | `prompts/dependency_graph_v3.md` | 依赖图提示词；文件不存在时使用代码内置提示词 |
-| `RAG_DEPENDENCY_GRAPH_PROMPT_VERSION` | 字符串 | `dependency_graph_v3` | 依赖图输出协议版本；与历史状态不一致时触发全量语义重建 |
+| `RAG_DEPENDENCY_GRAPH_PROMPT_PATH` | 路径 | `prompts/dependency_graph_v5.md` | 依赖图提示词；文件不存在时使用代码内置提示词 |
+| `RAG_DEPENDENCY_GRAPH_PROMPT_VERSION` | 字符串 | `dependency_graph_v5` | 依赖整理协议版本。变化时重跑依赖整理，不因此重做标注。v5 只接收身份和规矩笔记 |
 | `RAG_DEPENDENCY_VECTOR_ENABLED` | 布尔 | `false` | 建库时是否创建 `dependency_vec` 向量集合 |
 
 `RAG_DEPENDENCY_VECTOR_ENABLED` 同时被在线查询读取。要使用依赖向量兜底，建库和查询必须都设置为 `true`，并重新构建索引。查询开启但索引中没有 `dependency_vec` 时会记录警告并关闭依赖向量兜底，不影响普通依赖图扩展。

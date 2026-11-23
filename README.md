@@ -36,9 +36,9 @@
 - 未变化 chunk 复用标注和向量检查点；标注或依赖图输出协议对应的 prompt 版本变化时才全量重跑。
 - 标注和依赖聚合的成功检查点按内容及 prompt 版本复用，不再把模型名作为命中条件；记录中的 `model` 字段保留实际生成模型，切换模型不会重复消耗 token。
 - 正文向量和 BM25 使用带归档路径的上下文，用来区分同一上级目录下的不同业务线，例如 Google 订阅和支付网关。
-- 由切分阶段生成 `heading_path` 和 `archive_path`，使用 LLM 为 chunk 生成摘要、关键词和自由标注的 `dependency_topics` 等语义元数据。
+- 由切分阶段生成 `heading_path` 和 `archive_path`，使用 LLM 为 chunk 生成摘要、关键词、`dependency_topics`，以及当前段身份 `subject` 和替别人定下的规矩 `stated_rules`。
 - `dependency_topics` 不使用固定注册表，只做清洗、去重和数量限制；它是可选解释信息，不参与文档增量失效或依赖边有效性判断。
-- 按单个 Markdown 文档聚合全量 node 直接依赖图，并校验文档状态、node 覆盖和关系字段。
+- 按单个 Markdown 文档把全部 `subject` 和 `stated_rules` 一次交给模型整理直接依赖。没有规矩的文档不调用模型。没有被约束到的段落由程序补成空数组。
 - 生成正文向量和摘要向量两路 embedding。
 - 可选生成 `dependency_vec`，只用于定位 source node，不直接作为答案证据。
 - 写入 Chroma 向量库、BM25 索引和 `metadata.json`。

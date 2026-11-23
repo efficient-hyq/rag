@@ -2,7 +2,7 @@
 
 ## 笔记
 - subject 描述一段自己是什么。kind 取接口、配置、流程、规则、错误码、其他。title 是标题。identifiers 是路径、配置键、请求头、错误码等具体名字。
-- stated_rules 是这段替别人定下的规矩。requirement 是要求，applies_to 是适用范围原文，required 表示是否强制，identifiers 是范围里的具体名字，evidence 是原文依据。
+- stated_rules 是这段替别人定下的规矩。requirement 是要求，applies_to 是适用范围，都可以是短词概括。required 表示是否强制，identifiers 是范围里的具体名字，evidence 是一句依据。
 
 ## 输入
 一次只处理当前这篇文档。`chunks` 是这篇文档的全部笔记，整理其中每一条 `stated_rules`。

@@ -37,7 +37,7 @@
 - 标注和依赖聚合的成功检查点按内容及 prompt 版本复用，不再把模型名作为命中条件；记录中的 `model` 字段保留实际生成模型，切换模型不会重复消耗 token。
 - 正文向量和 BM25 使用带归档路径的上下文，用来区分同一上级目录下的不同业务线，例如 Google 订阅和支付网关。
 - 由切分阶段生成 `heading_path` 和 `archive_path`。`heading_path` 按标题级别入栈，文档 H1 会进入后续章节；覆盖整节的 chunk 使用该节标题。超长原子章节超过上限后按常规规则落盘，只有标题的碎片会并入相邻 chunk。
-- 使用 LLM 为 chunk 生成摘要、关键词、`dependency_topics`，以及当前段身份 `subject` 和替别人定下的规矩 `stated_rules`。
+- 使用 LLM 为 chunk 生成摘要、关键词、`dependency_topics`，以及当前段身份 `subject` 和替别人定下的规矩 `stated_rules`。规矩用短词概括，不要求逐字照抄正文。
 - `dependency_topics` 不使用固定注册表，只做清洗、去重和数量限制；它是可选解释信息，不参与文档增量失效或依赖边有效性判断。
 - 按单个 Markdown 文档把全部 `subject` 和 `stated_rules` 一次交给模型整理直接依赖。没有规矩的文档不调用模型。没有被约束到的段落由程序补成空数组。
 - 生成正文向量和摘要向量两路 embedding。

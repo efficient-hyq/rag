@@ -2,9 +2,9 @@
 
 任务边界：
 - 只分析用户提供的单个 chunk，不判断 chunk 之间的依赖关系。
-- 不改写、不续写、不拆分、不合并原文，不输出解释、Markdown、代码块或额外字段。
+- 不续写、不拆分、不合并原文，不输出解释、Markdown、代码块或额外字段。
 - 无法判断时使用保守值。摘要可以吸收定位说明里的位置和主体，但不能编造定位说明和正文都没有的事实。
-- subject 和 stated_rules 只依据正文，不依据定位说明。
+- subject 和 stated_rules 只依据正文，不依据定位说明。stated_rules 的要求和适用范围可以压缩成短词，不必逐字照抄。
 
 输出必须是严格 JSON 对象：
 {
@@ -22,11 +22,11 @@
   },
   "stated_rules": [
     {
-      "requirement": "要求本身，必须是正文中的连续原文",
-      "applies_to": "适用范围，必须是正文中的连续原文",
+      "requirement": "短词概括的要求",
+      "applies_to": "短词概括的适用范围",
       "required": true,
-      "identifiers": ["适用范围里的具体名字，最多 8 个"],
-      "evidence": "包含这条规矩的连续原文"
+      "identifiers": ["范围里的路径、请求头或配置名，最多 8 个"],
+      "evidence": "一句短依据，保留原意即可"
     }
   ]
 }
@@ -43,6 +43,10 @@
 - topic 不受固定词表约束，由你结合正文自由概括为简短、可读的中文主题；通常返回 0 到 3 个，最多 5 个。
 - 没有依据时返回空数组，不根据定位说明或通用常识补充；优先使用正文中的稳定业务术语。
 - subject 描述当前这段自己是什么。kind 只能取接口、配置、流程、规则、错误码、其他。title 使用正文或章节中的标题。identifiers 只收录正文里出现的路径、配置键、请求头、错误码等具体名字，没有则为空数组。
-- stated_rules 只在正文用一句话规定了别人时填写。requirement、applies_to、evidence、identifiers 都必须是正文中的连续原文。required 仅在原文表示强制、必须时为 true。
-- 适用范围可以是路径、配置、流程、错误码或“全部接口”“全部回调配置”这类说法。本段没有规定别人时，stated_rules 返回空数组。
+- stated_rules 只记录这段替别的接口、配置、回调或请求定下的规矩，最多 3 条。本段只解释自己的参数、示例或字段时返回空数组。不要用定位说明或常识补规矩。
+- requirement、applies_to 用短词写出要求和适用范围，同义压缩可以，例如「均需要做签名校验」写成「做签名校验」，「所有接口」可以写成「全部接口」。evidence 用一句短依据，去掉 Markdown 转义和多余标点，不必整段照抄。
+- required 在正文出现「必须、需要、均需、强制」时为 true，只是可选说明时为 false。
+- 例：正文「所有接口均需要做签名校验，并设置请求头 X-Signature」。应记一条：requirement=做签名校验，applies_to=所有接口，required=true，identifiers=["X-Signature"]，evidence=所有接口均需要做签名校验。
+- 例：正文「生产环境的回调配置必须填写签名密钥」。应记一条：requirement=填写签名密钥，applies_to=生产环境的回调配置，required=true，evidence=回调配置必须填写签名密钥。
+- 例：正文只是参数表，列出 X-Signature 但没有说哪些调用必须带上。stated_rules 返回空数组。
 - 不要把依赖边写进标注结果。

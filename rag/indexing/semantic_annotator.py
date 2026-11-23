@@ -262,39 +262,58 @@ def _normalize_subject(raw: Any, source_text: str, heading_path: str) -> dict[st
     }
 
 
-def _normalize_stated_rules(raw: Any, source_text: str) -> list[dict[str, Any]]:
-    """只保留依据能在当前正文中原样找到的规矩。"""
-    if not isinstance(raw, list) or not source_text:
+def _normalize_stated_rules(raw: Any, source_text: str = "") -> list[dict[str, Any]]:
+    """整理规矩的结构。要求和依据允许概括，不再因为没有逐字出现在正文里就丢弃。"""
+    del source_text
+    if not isinstance(raw, list):
         return []
     rules: list[dict[str, Any]] = []
     for item in raw:
         if len(rules) >= MAX_STATED_RULES or not isinstance(item, dict):
             continue
-        evidence = str(item.get("evidence") or "").strip()
-        requirement = str(item.get("requirement") or "").strip()
-        applies_to = str(item.get("applies_to") or "").strip()
-        required = item.get("required")
-        if (
-            not evidence
-            or evidence not in source_text
-            or len(evidence) > 200
-            or not requirement
-            or requirement not in source_text
-            or not applies_to
-            or applies_to not in source_text
-            or not isinstance(required, bool)
-        ):
+        evidence = _compact_text(item.get("evidence"))
+        requirement = _compact_text(item.get("requirement"))
+        applies_to = _compact_text(item.get("applies_to"))
+        if not evidence or not requirement or not applies_to:
             continue
         rules.append(
             {
                 "requirement": requirement[:80],
                 "applies_to": applies_to[:120],
-                "required": required,
-                "identifiers": _grounded_identifiers(item.get("identifiers"), source_text, MAX_SUBJECT_IDENTIFIERS),
-                "evidence": evidence,
+                "required": _coerce_required(item.get("required")),
+                "identifiers": _clean_identifiers(item.get("identifiers"), MAX_SUBJECT_IDENTIFIERS),
+                "evidence": evidence[:200],
             }
         )
     return rules
+
+
+def _compact_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _coerce_required(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    return str(value or "").strip().casefold() in {"true", "1", "yes", "是", "必须", "需要", "强制"}
+
+
+def _clean_identifiers(value: Any, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        token = str(item or "").strip()
+        key = token.casefold()
+        if token and key not in seen:
+            result.append(token[:80])
+            seen.add(key)
+            if len(result) >= limit:
+                break
+    return result
 
 
 def _grounded_identifiers(value: Any, source: str, limit: int) -> list[str]:
@@ -347,6 +366,6 @@ DEFAULT_ANNOTATION_PROMPT = """
 - dependency_topics 表示当前 chunk 正文提供的依赖能力证据，不表示页面类型或依赖关系类型；仅提及名词但未提供规则、配置、约束或操作证据时不要标注。
 - 通常返回 0 到 3 个 topic，优先使用正文中的稳定业务术语。
 - subject 描述当前 chunk 自己是什么。kind 只能取接口、配置、流程、规则、错误码、其他。identifiers 必须是正文或标题中的连续原文。
-- stated_rules 只在正文规定了别人时填写。requirement、applies_to、evidence、identifiers 都必须是正文中的连续原文。没有规矩时返回空数组。
+- stated_rules 只在正文替别的接口、配置、回调或请求定下规矩时填写。requirement 和 applies_to 用短词概括，evidence 保留一句依据，都不必逐字照抄。本段没有约束别人时返回空数组。
 - 不要输出 chunk 之间的依赖边。
 """.strip()

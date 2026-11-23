@@ -41,24 +41,51 @@ class AnnotationNoteTests(unittest.TestCase):
         self.assertEqual(annotation["stated_rules"][0]["applies_to"], "生产环境的全部回调配置")
         self.assertTrue(annotation["stated_rules"][0]["required"])
 
-    def test_drops_rule_whose_evidence_is_not_in_chunk(self) -> None:
+    def test_keeps_paraphrased_signature_rule(self) -> None:
+        source = (
+            "所有接口均需要做签名校验，校验方法为设置HTTP请求头X-Signature为签名值，"
+            "签名值通过**Base64URLSafe(HMAC\\_SHA\\_256 (signatureKey))**生成。"
+        )
+        annotation = normalize_annotation(
+            {
+                "subject": {"kind": "规则", "title": "验签说明", "identifiers": ["X-Signature"]},
+                "stated_rules": [
+                    {
+                        "requirement": "做签名校验",
+                        "applies_to": "全部接口",
+                        "required": "true",
+                        "identifiers": ["X-Signature", "HMAC_SHA_256"],
+                        "evidence": "所有接口需用 X-Signature 做 HMAC_SHA_256 签名校验",
+                    }
+                ],
+            },
+            source_text=source,
+        )
+
+        rule = annotation["stated_rules"][0]
+        self.assertEqual(rule["requirement"], "做签名校验")
+        self.assertEqual(rule["applies_to"], "全部接口")
+        self.assertTrue(rule["required"])
+        self.assertEqual(rule["identifiers"], ["X-Signature", "HMAC_SHA_256"])
+        self.assertIn("签名校验", rule["evidence"])
+
+    def test_drops_rule_missing_scope_or_evidence(self) -> None:
         annotation = normalize_annotation(
             {
                 "stated_rules": [
                     {
-                        "requirement": "加解密",
-                        "applies_to": "所有接口",
+                        "requirement": "做签名校验",
+                        "applies_to": "",
                         "required": True,
-                        "identifiers": ["/pay/v1/"],
-                        "evidence": "所有接口强制要求加解密",
+                        "identifiers": [],
+                        "evidence": "所有接口均需要做签名校验",
                     }
                 ]
             },
-            source_text="生成订单接口只列出金额和订单号。",
+            source_text="所有接口均需要做签名校验。",
         )
 
         self.assertEqual(annotation["stated_rules"], [])
-        self.assertEqual(annotation["subject"]["kind"], "其他")
 
 
 class DependencyNoteTests(unittest.TestCase):

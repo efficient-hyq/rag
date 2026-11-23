@@ -113,17 +113,14 @@ def publish_index(storage_dir: str | Path, workspace_dir: str | Path) -> Path:
     if not embedding_model:
         raise ValueError("工作区构建清单缺少 embedding_model")
 
-    previous_final = (
-        resolve_final_index(storage_root)
-        if (storage_root / MANIFEST_FILENAME).exists()
-        else None
-    )
+    previous_final = _previous_final_index(storage_root)
     token = uuid.uuid4().hex
     candidate = storage_root / f".{PUBLISHED_INDEX_DIR_PREFIX}publishing-{token}"
     manifest_temporary = storage_root / f".{MANIFEST_FILENAME}.{token}.tmp"
     final_dir = storage_root / f"{PUBLISHED_INDEX_DIR_PREFIX}{token}"
 
     candidate.mkdir(parents=False, exist_ok=False)
+    renamed = False
     try:
         _copy_artifacts(workspace, candidate, PUBLISHED_ARTIFACTS)
         _validate_published_copy(candidate, workspace)
@@ -143,13 +140,15 @@ def publish_index(storage_dir: str | Path, workspace_dir: str | Path) -> Path:
 
         try:
             candidate.rename(final_dir)
+            renamed = True
             manifest_temporary.replace(storage_root / MANIFEST_FILENAME)
         except Exception:
-            if final_dir.exists():
+            # 改名未完成时才删目标目录。Windows 上改名成功后旧路径仍可能短暂可见，不能再删。
+            if not renamed and final_dir.exists():
                 _remove_path(final_dir)
             raise
     finally:
-        if candidate.exists():
+        if not renamed and candidate.exists():
             _remove_path(candidate)
         if manifest_temporary.exists():
             manifest_temporary.unlink()
@@ -254,17 +253,39 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _previous_final_index(storage_root: Path) -> Path | None:
+    """读取上一版发布目录。清单还在但目录已经丢了时，允许继续发布新目录。"""
+    manifest_path = storage_root / MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    try:
+        return resolve_final_index(storage_root)
+    except FileNotFoundError as exc:
+        logging.getLogger("rag.pipeline").warning(
+            "根清单指向的最终索引目录不存在，本次将重新发布 | error=%s",
+            exc,
+        )
+        return None
+
+
 def _cleanup_obsolete_publications(
     storage_root: Path,
     current_final: Path,
     previous_final: Path | None,
 ) -> None:
     logger = logging.getLogger("rag.pipeline")
+    protected = {current_final.name}
+    manifest_path = storage_root / MANIFEST_FILENAME
+    if manifest_path.exists():
+        payload = _load_json_object(manifest_path)
+        recorded = str(payload.get("final_index_dir") or "").strip()
+        if recorded:
+            protected.add(recorded)
     candidates = set(storage_root.glob(f"{PUBLISHED_INDEX_DIR_PREFIX}*"))
     if previous_final is not None:
         candidates.add(previous_final)
     for path in sorted(candidates):
-        if path == current_final or not path.is_dir():
+        if path.name in protected or not path.is_dir():
             continue
         try:
             _remove_path(path)

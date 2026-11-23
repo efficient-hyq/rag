@@ -460,7 +460,7 @@ $env:RAG_DEPENDENCY_VECTOR_ENABLED = "true"
 | 根发布清单 | `storage/manifest.json` |
 | 最终在线索引 | `storage/<final_index_dir>/` |
 
-建库失败时工作区会保留用于排查，但根 `manifest.json` 不会切换，在线查询继续使用上一份已成功发布的完整索引。
+建库失败时工作区会保留用于排查，但根 `manifest.json` 不会切换，在线查询继续使用上一份已成功发布的完整索引。清单指向的目录已经丢失时，下一次成功发布会新建目录并更新清单。
 
 ## 16. 当前实现中的易错点
 

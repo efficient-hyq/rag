@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from rag.agent.session import ANSWER_HISTORY_CHARS, CHAT, FOLLOW_UP, KNOWLEDGE, Session
+from rag.agent.session import ANSWER_HISTORY_CHARS, CHAT, FOLLOW_UP, KNOWLEDGE, Session, normalize_route
 
 
 class SessionTests(unittest.TestCase):
@@ -112,6 +112,55 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(messages[-1]["role"], "tool")
         self.assertNotIn("tool", [item["role"] for item in messages[:-2]])
         self.assertIn("最近几轮对话", str(messages[0]["content"]))
+
+    def test_router_overrides_fixed_words_and_only_follow_up_is_rewritten(self) -> None:
+        rewritten: list[str] = []
+
+        def rewrite(questions: list[str], question: str) -> str:
+            rewritten.append(question)
+            self.assertEqual(questions, ["你好，谷歌订阅如何接入"])
+            return "谷歌订阅的超时时间"
+
+        def router(questions: list[str], current: str) -> str:
+            if "超时" in current:
+                return '{"route":"follow_up"}'
+            if current == "谢谢":
+                return "chat"
+            return "knowledge"
+
+        session = Session(rewriter=rewrite, router=router)
+        first = session.prepare("你好，谷歌订阅如何接入")
+        session.record(first, "先配置服务账号。")
+        thanks = session.prepare("谢谢")
+        follow_up = session.prepare("超时呢")
+
+        self.assertEqual(first.route, KNOWLEDGE)
+        self.assertEqual(first.resolved_question, "你好，谷歌订阅如何接入")
+        self.assertEqual(thanks.route, CHAT)
+        self.assertFalse(thanks.retrieve)
+        self.assertEqual(follow_up.route, FOLLOW_UP)
+        self.assertEqual(follow_up.resolved_question, "谷歌订阅的超时时间")
+        self.assertEqual(rewritten, ["超时呢"])
+
+    def test_router_failure_falls_back_to_rules(self) -> None:
+        def router(questions: list[str], current: str) -> str:
+            raise RuntimeError("路由不可用")
+
+        prepared = Session(router=router).prepare("你好")
+
+        self.assertEqual(prepared.route, CHAT)
+        self.assertFalse(prepared.retrieve)
+
+    def test_follow_up_without_history_is_not_rewritten(self) -> None:
+        prepared = Session(router=lambda questions, current: "follow_up").prepare("它的回调呢")
+
+        self.assertEqual(prepared.route, KNOWLEDGE)
+        self.assertEqual(prepared.resolved_question, "它的回调呢")
+
+    def test_normalize_route_reads_json_object(self) -> None:
+        self.assertEqual(normalize_route('说明\n{"route":"knowledge"}'), KNOWLEDGE)
+        self.assertEqual(normalize_route("follow_up"), FOLLOW_UP)
+        self.assertEqual(normalize_route("不确定"), "")
 
     def test_chat_does_not_enter_answer_history(self) -> None:
         session = Session()

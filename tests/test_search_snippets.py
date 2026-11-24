@@ -62,7 +62,7 @@ class SearchSnippetsTests(unittest.TestCase):
             payload = json.loads(tools.search_knowledge_base("  谷歌订阅  ", top_k=20))
 
         self.assertEqual(fake.query, "谷歌订阅")
-        self.assertEqual(fake.top_k, 8)
+        self.assertEqual(fake.top_k, 15)
         self.assertEqual(payload[0]["node_id"], "node-1")
         self.assertEqual(payload[0]["file_name"], "支付流程.md")
         self.assertEqual(len(payload[0]["snippet"]), 200)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -63,6 +65,8 @@ ANSWER_HISTORY_CHARS = 400
 REWRITE_QUESTION_TURNS = 8
 
 FollowUpRewriter = Callable[[list[str], str], str]
+QuestionRouter = Callable[[list[str], str], str]
+_ROUTES = {CHAT, FOLLOW_UP, KNOWLEDGE}
 
 
 @dataclass(frozen=True)
@@ -88,15 +92,16 @@ class Session:
     """保存最近主题和三轮问答，并把追问交给改写器补成独立问题。"""
 
     rewriter: FollowUpRewriter | None = None
+    router: QuestionRouter | None = None
     anchors: list[str] = field(default_factory=list)
     turns: list[PreparedQuestion] = field(default_factory=list)
     history: list[DialogueTurn] = field(default_factory=list)
     question_log: list[str] = field(default_factory=list)
 
     def prepare(self, question: str) -> PreparedQuestion:
-        """判断问题类型。追问会用历史提问改写成独立问题。"""
+        """判断问题类型。只有追问会用历史提问改写成独立问题。"""
         text = question.strip()
-        route = self.route(text)
+        route = self._decide_route(text)
         resolved = text
         if route == FOLLOW_UP:
             resolved = self._complete(text)
@@ -132,12 +137,29 @@ class Session:
         return messages
 
     def route(self, question: str) -> str:
-        """闲聊直接回答，带指代的追问先补全，其余问题进入检索。"""
+        """规则兜底：闲聊直接回答，带指代的追问先补全，其余问题进入检索。"""
         if _is_chat(question) and not extract_domain_terms(question):
             return CHAT
         if self.anchors and _is_follow_up(question) and not _switches_topic(question, self.anchors):
             return FOLLOW_UP
         return KNOWLEDGE
+
+    def _decide_route(self, question: str) -> str:
+        """优先交给路由模型。模型不可用或结果无效时，再用固定规则兜底。"""
+        if self.router is not None:
+            logger = logging.getLogger("rag.agent.session")
+            try:
+                raw = self.router(self.prior_questions(), question)
+            except Exception:
+                logger.exception("问题路由失败，改用规则")
+                return self.route(question)
+            route = normalize_route(str(raw or ""))
+            if route == FOLLOW_UP and not self.question_log:
+                return KNOWLEDGE
+            if route:
+                return route
+            logger.warning("问题路由结果无效，改用规则")
+        return self.route(question)
 
     def _complete(self, question: str) -> str:
         if self.rewriter is not None:
@@ -216,6 +238,26 @@ def _is_follow_up(question: str) -> bool:
 def _switches_topic(question: str, anchors: list[str]) -> bool:
     anchor_keys = {anchor.casefold() for anchor in anchors}
     return any(term.casefold() not in anchor_keys for term in extract_domain_terms(question))
+
+
+def normalize_route(content: str) -> str:
+    """从模型输出中取出 chat、follow_up 或 knowledge。无法识别时返回空字符串。"""
+    raw = content.strip()
+    if raw in _ROUTES:
+        return raw
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if match is None:
+        return ""
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    route = str(payload.get("route") or "").strip()
+    if route in _ROUTES:
+        return route
+    return ""
 
 
 def _dedupe(values: list[str]) -> list[str]:

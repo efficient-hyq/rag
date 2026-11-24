@@ -23,7 +23,11 @@ from rag.retrieval.dependency_recall import (
     select_dependency_seeds,
 )
 from rag.indexing.publication import resolve_final_index
+from rag.retrieval.retired import exclude_retired_candidates, usable_text
 from rag.retrieval.tokenization import tokenize_for_bm25, tokenize_technical_text
+
+# 答案模型单次看到的 chunk 上限。常规 TopN 和强制依赖都算在内。
+ANSWER_CONTEXT_LIMIT = 15
 
 
 @dataclass
@@ -180,9 +184,13 @@ def expand_neighbor_candidates(
             if neighbor_id in seen_ids:
                 continue
             metadata = dict(metadata_index.metadata_by_id.get(neighbor_id, {}))
+            cleaned = usable_text(metadata)
+            if cleaned is None:
+                continue
+            metadata["text"] = cleaned
             neighbor = RetrievalCandidate(
                 node_id=neighbor_id,
-                text=str(metadata.get("text") or ""),
+                text=cleaned,
                 metadata=metadata,
                 hits=[
                     RetrievedRouteHit(
@@ -223,7 +231,7 @@ class BM25KeywordRetriever:
         )
         hits: list[RetrievedRouteHit] = []
         positive = [(node_id, score) for node_id, score in ranked if score > 0]
-        for rank, (node_id, score) in enumerate(positive[:top_k], start=1):
+        for rank, (node_id, score) in enumerate(positive[: max(top_k, 0)], start=1):
             hits.append(
                 RetrievedRouteHit(
                     node_id=str(node_id),
@@ -334,8 +342,10 @@ class HybridRetriever:
             hits.extend(rewritten_hits)
             logger.info("改写召回完成 | query=%s | 命中数=%s", rewritten_query, len(rewritten_hits))
 
-        candidates = aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
-        logger.info("候选聚合完成 | 候选数=%s", len(candidates))
+        candidates, dropped = exclude_retired_candidates(
+            aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
+        )
+        logger.info("候选聚合完成 | 候选数=%s | 排除废弃或过时=%s", len(candidates), dropped)
         coarse_ranked = apply_archive_affinity(query, self.rule_reranker.rerank(candidates))
         decision = self.dependency_router.decide(query) if self.dependency_enabled else None
         dependency_expansion = None
@@ -397,7 +407,14 @@ class HybridRetriever:
             )
         else:
             top_candidates = final_ranked[: self.final_top_n]
-        regular_top_n = min(max(self.final_top_n, 0), len(final_ranked))
+        if len(top_candidates) > ANSWER_CONTEXT_LIMIT:
+            logger.info(
+                "答案语料达到上限 | 原数量=%s | 上限=%s",
+                len(top_candidates),
+                ANSWER_CONTEXT_LIMIT,
+            )
+            top_candidates = top_candidates[:ANSWER_CONTEXT_LIMIT]
+        regular_top_n = min(max(self.final_top_n, 0), len(final_ranked), len(top_candidates))
         forced_dependency_count = len(top_candidates) - regular_top_n
         logger.info(
             "重排完成 | 最终候选数=%s | 常规TopN=%s | 强制依赖数=%s | 上下文候选数=%s",
@@ -425,7 +442,10 @@ class HybridRetriever:
         logger.info("片段检索开始 | query=%s | top_k=%s", query, limit)
         query_embedding = self.embedder.get_text_embedding(query)
         hits = self._retrieve_for_query(query, query_embedding, is_rewritten=False)
-        candidates = aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
+        candidates, dropped = exclude_retired_candidates(
+            aggregate_route_hits(hits, self.metadata_index.metadata_by_id)
+        )
+        logger.info("片段候选聚合完成 | 候选数=%s | 排除废弃或过时=%s", len(candidates), dropped)
         ranked = apply_archive_affinity(query, self.rule_reranker.rerank(candidates))
         selected = ranked[:limit]
         logger.info("片段检索完成 | 命中数=%s | 候选数=%s | 返回数=%s",len(hits),len(ranked),len(selected))
@@ -473,11 +493,15 @@ class HybridRetriever:
                 is_rewritten=is_rewritten,
             )
         )
+        bm25_limit = bm25_top_k or self.bm25_top_k
         hits.extend(
-            self.bm25_retriever.retrieve(
-                query=query,
-                top_k=bm25_top_k or self.bm25_top_k,
-                is_rewritten=is_rewritten,
+            self._keep_usable(
+                self.bm25_retriever.retrieve(
+                    query=query,
+                    top_k=max(bm25_limit * 3, bm25_limit),
+                    is_rewritten=is_rewritten,
+                ),
+                bm25_limit,
             )
         )
         logger.info(
@@ -490,8 +514,8 @@ class HybridRetriever:
         )
         return hits
 
-    @staticmethod
     def _query_vector_route(
+        self,
         collection: Any,
         route: str,
         query: str,
@@ -499,29 +523,71 @@ class HybridRetriever:
         top_k: int,
         is_rewritten: bool,
     ) -> list[RetrievedRouteHit]:
-        if not query_embedding:
+        if not query_embedding or top_k <= 0:
             return []
-        result = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["distances"],
-        )
+        pool = max(top_k * 3, top_k)
+        try:
+            result = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=pool,
+                include=["distances"],
+            )
+        except Exception as exc:
+            logging.getLogger("rag.retriever").warning(
+                "向量扩召回失败，改用原 top_k | route=%s | error=%s",
+                route,
+                exc,
+            )
+            result = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                include=["distances"],
+            )
         ids = result.get("ids", [[]])
         distances = result.get("distances", [[]])
         route_ids = ids[0] if ids else []
         route_distances = distances[0] if distances else []
 
         hits: list[RetrievedRouteHit] = []
-        for rank, node_id in enumerate(route_ids, start=1):
-            distance = route_distances[rank - 1] if rank - 1 < len(route_distances) else 0.0
+        for index, node_id in enumerate(route_ids):
+            if not self._is_usable_node(str(node_id)):
+                continue
+            distance = route_distances[index] if index < len(route_distances) else 0.0
             hits.append(
                 RetrievedRouteHit(
                     node_id=str(node_id),
                     route=route,
-                    rank=rank,
+                    rank=len(hits) + 1,
                     raw_score=float(-distance),
                     query_text=query,
                     is_rewritten=is_rewritten,
                 )
             )
+            if len(hits) >= top_k:
+                break
         return hits
+
+    def _keep_usable(self, hits: list[RetrievedRouteHit], limit: int) -> list[RetrievedRouteHit]:
+        kept: list[RetrievedRouteHit] = []
+        for hit in hits:
+            if not self._is_usable_node(hit.node_id):
+                continue
+            kept.append(
+                RetrievedRouteHit(
+                    node_id=hit.node_id,
+                    route=hit.route,
+                    rank=len(kept) + 1,
+                    raw_score=hit.raw_score,
+                    query_text=hit.query_text,
+                    is_rewritten=hit.is_rewritten,
+                )
+            )
+            if len(kept) >= limit:
+                break
+        return kept
+
+    def _is_usable_node(self, node_id: str) -> bool:
+        metadata = self.metadata_index.metadata_by_id.get(node_id)
+        if not metadata:
+            return False
+        return usable_text(metadata) is not None

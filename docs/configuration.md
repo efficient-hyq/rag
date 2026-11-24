@@ -331,12 +331,12 @@
 | --- | --- | --- | --- |
 | `RAG_RERANK_LLM_ENABLED` | 布尔 | `true` | 是否对规则粗排头部候选执行 LLM 精排；还要求存在 `DASHSCOPE_API_KEY` |
 | `RAG_RERANK_LLM_MODEL` | 字符串 | `qwen3.6-plus` | LLM 精排模型 |
-| `RAG_RERANK_LLM_TOP_N` | 整数 | `10` | 送入 LLM 精排的规则粗排候选数 |
-| `RAG_RERANK_FINAL_TOP_N` | 整数 | `5` | 未启用依赖扩展时，最终传给答案生成器的候选数量 |
+| `RAG_RERANK_LLM_TOP_N` | 整数 | `15` | 送入 LLM 精排的规则粗排候选数 |
+| `RAG_RERANK_FINAL_TOP_N` | 整数 | `12` | 未启用依赖扩展时，最终传给答案生成器的候选数量 |
 
 规则粗排器内部固定使用 `rrf_k=60`，当前没有对应环境变量。LLM 精排后的融合权重固定为规则分 `20%`、LLM 分 `80%`，当前也没有对应环境变量。
 
-当依赖扩展实际发生时，最终上下文按依赖关系重新组装，主要受 `RAG_DEPENDENCY_TOTAL_LIMIT` 控制，不再简单使用 `RAG_RERANK_FINAL_TOP_N` 截断。
+当依赖扩展实际发生时，最终上下文按依赖关系重新组装，常规候选仍受 `RAG_RERANK_FINAL_TOP_N` 控制，强制依赖另计。无论是否扩展，交给答案模型的 chunk 总数都不超过 15。
 
 ## 11. 答案生成环境变量
 
@@ -347,7 +347,7 @@
 | `RAG_ANSWER_CONTEXT_TOP_K` | 整数 | `4` | 兼容保留参数；当前实现不会用它二次截断候选列表 |
 | `RAG_ANSWER_MAX_CONTEXT_CHARS` | 整数 | `1200` | 每个候选写入答案提示词时最多保留的字符数 |
 
-`RAG_ANSWER_CONTEXT_TOP_K` 当前只被保存到 `AnswerGenerator` 对象，没有参与 `generate()` 的上下文切片。调整它不会改变实际引用数量。实际数量由普通场景的 `RAG_RERANK_FINAL_TOP_N` 或依赖场景的 `RAG_DEPENDENCY_TOTAL_LIMIT` 决定。
+`RAG_ANSWER_CONTEXT_TOP_K` 当前只被保存到 `AnswerGenerator` 对象，没有参与 `generate()` 的上下文切片。调整它不会改变实际引用数量。实际数量由 `RAG_RERANK_FINAL_TOP_N` 和依赖扩展追加的证据共同决定，并且硬上限是 15。
 
 当 `RAG_ANSWER_ENABLED=false` 或没有 `DASHSCOPE_API_KEY` 时，不会返回空答案，而是输出候选摘要或正文片段，并保留引用来源。
 

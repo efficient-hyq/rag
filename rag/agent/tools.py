@@ -7,15 +7,16 @@ from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 
-from rag.agent.session import CHAT, Session
+from rag.agent.session import CHAT, Session, normalize_route
+from rag.retrieval.retired import usable_text
 from rag.config.common import PathConfig
 from rag.config.retrieval import QueryConfig
 from rag.retrieval.query_service import build_query_service
 from rag.retrieval.retriever import HybridRetriever, RetrievalCandidate
 
 SNIPPET_CHARS = 200
-DEFAULT_TOP_K = 5
-MAX_TOP_K = 8
+DEFAULT_TOP_K = 12
+MAX_TOP_K = 15
 
 TOOLS = [
     {
@@ -30,8 +31,8 @@ TOOLS = [
                     "top_k": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 8,
-                        "description": "返回条数，默认 5。摘要不够覆盖问题时再加大",
+                        "maximum": 15,
+                        "description": "返回条数，默认 12，最多 15。摘要不够覆盖问题时再加大",
                     },
                 },
                 "required": ["query"],
@@ -98,8 +99,8 @@ TOOLS = [
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 8,
-                        "description": "最多返回几条，默认 8",
+                        "maximum": 15,
+                        "description": "最多返回几条，默认 15",
                     },
                     "offset": {
                         "type": "integer",
@@ -125,6 +126,10 @@ def read_chunk(node_id: str) -> str:
         if metadata is None:
             logger.info("片段不存在 | node_id=%s", normalized_id)
             return _dump({"found": False, "node_id": normalized_id})
+        cleaned = usable_text(metadata)
+        if cleaned is None:
+            logger.info("片段已废弃或已过时 | node_id=%s", normalized_id)
+            return _dump({"found": False, "node_id": normalized_id, "reason": "文档或章节已废弃或已过时"})
         file_path = chunk_file_path(metadata, _get_docs_dir())
     except Exception as exc:
         logger.exception("读取片段失败 | node_id=%s", normalized_id)
@@ -140,7 +145,7 @@ def read_chunk(node_id: str) -> str:
         "file_path": file_path,
         "heading_path": str(metadata.get("heading_path") or ""),
         "chunk_index": metadata.get("chunk_index"),
-        "text": str(metadata.get("text") or ""),
+        "text": cleaned,
     }
     logger.info(
         "读取片段完成 | node_id=%s | file_path=%s | 字数=%s",
@@ -172,7 +177,12 @@ def get_dependencies(node_id: str) -> str:
         target_id = str(edge.get("node_id") or "").strip()
         if not target_id:
             continue
-        item = _summary_view(target_id, retriever.metadata_index.metadata_by_id.get(target_id, {}))
+        metadata = dict(retriever.metadata_index.metadata_by_id.get(target_id, {}))
+        cleaned = usable_text(metadata)
+        if cleaned is None:
+            continue
+        metadata["text"] = cleaned
+        item = _summary_view(target_id, metadata)
         item["topic"] = str(edge.get("topic") or "")
         item["reason"] = str(edge.get("reason") or "")
         dependencies.append(item)
@@ -429,7 +439,12 @@ def _neighbor_views(metadata_index: object, node_id: str, metadata: dict[str, ob
             neighbor_id = lookup.get((doc_id, center + delta))
             if neighbor_id is None or neighbor_id == node_id:
                 continue
-            item = _summary_view(neighbor_id, metadata_index.metadata_by_id.get(neighbor_id, {}))
+            metadata = dict(metadata_index.metadata_by_id.get(neighbor_id, {}))
+            cleaned = usable_text(metadata)
+            if cleaned is None:
+                continue
+            metadata["text"] = cleaned
+            item = _summary_view(neighbor_id, metadata)
             item["relation"] = relation
             neighbors.append(item)
     return neighbors
@@ -456,11 +471,13 @@ def _grep_markdown(
             continue
         matched: list[tuple[str, dict[str, object], int, str]] = []
         for node_id, metadata in grouped[relative]:
-            text = str(metadata.get("text") or "")
+            text = usable_text(metadata)
+            if text is None:
+                continue
             position = text.find(pattern)
             if position < 0:
                 continue
-            matched.append((node_id, metadata, position, text))
+            matched.append((node_id, dict(metadata), position, text))
         matched.sort(key=lambda item: (_chunk_index_sort_key(item[1]), item[0]))
         document_matches: list[dict[str, object]] = []
         for node_id, metadata, position, text in matched:
@@ -543,7 +560,8 @@ SYSTEM_PROMPT = """\
 
 硬边界：
 - 只使用工具返回的资料和其中出现的 node_id。
-- 检索量和是否继续由你判断，当前结果已经够回答就停止。
+- 路径、文件名或标题标明已废弃、（废弃）、已过时、已经过时的文档，以及标题被删除线划掉的废弃章节，不能当作资料。工具不会返回这类正文；片段里如果还夹着这类章节，忽略该章节。
+- 检索量和是否继续由你判断，当前结果已经够回答就停止。单次检索不要超过 15 条。
 - 资料不足时说明无法从现有文档回答。
 """
 HISTORY_BOUNDARY = """
@@ -557,6 +575,15 @@ FOLLOW_UP_REWRITE_PROMPT = """\
 不要回答，不要解释，不要加引号。
 当前句已经完整时，原样输出。
 只输出一句问题。
+"""
+QUESTION_ROUTE_PROMPT = """\
+你负责判断当前这句话在知识库多轮会话里属于哪一类。
+只输出 JSON：{"route":"chat"}、{"route":"follow_up"} 或 {"route":"knowledge"}。
+chat：寒暄、感谢、询问助手身份或能力，不需要查文档。
+follow_up：承接之前的提问，省略了产品、接口、配置或对象，必须结合历史提问才能独立检索。
+knowledge：这句话本身已经能独立检索。
+没有历史提问时不要输出 follow_up。
+不要回答问题，不要解释。
 """
 
 
@@ -579,7 +606,10 @@ def main() -> None:
         raise SystemExit("缺少 DASHSCOPE_API_KEY")
     client = OpenAI(api_key=config.llm.api_key, base_url=config.llm.base_url)
     model = os.getenv("MODEL") or config.answer.model
-    session = Session(rewriter=lambda questions, current: rewrite_follow_up(client, model, questions, current))
+    session = Session(
+        rewriter=lambda questions, current: rewrite_follow_up(client, model, questions, current),
+        router=lambda questions, current: route_question(client, model, questions, current),
+    )
     if args.chat:
         if args.question:
             _run_tool_loop(client, model, args.question, session)
@@ -636,6 +666,27 @@ def _answer_without_tools(client: object, model: str, question: str) -> str:
         extra_body={"enable_thinking": False},
     )
     return (response.choices[0].message.content or "").strip()
+
+
+def route_question(client: object, model: str, questions: list[str], current: str) -> str:
+    """让模型判断这句话是闲聊、追问还是独立提问。失败时返回空字符串，交给规则兜底。"""
+    numbered = "\n".join(f"{index}. {question}" for index, question in enumerate(questions, start=1))
+    history = numbered or "（无）"
+    logger = logging.getLogger("rag.agent.session")
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": QUESTION_ROUTE_PROMPT},
+                {"role": "user", "content": f"历史提问：\n{history}\n\n当前输入：{current}"},
+            ],
+            temperature=0,
+            extra_body={"enable_thinking": False},
+        )
+    except Exception:
+        logger.exception("问题路由失败")
+        return ""
+    return normalize_route(response.choices[0].message.content or "")
 
 
 def rewrite_follow_up(client: object, model: str, questions: list[str], current: str) -> str:

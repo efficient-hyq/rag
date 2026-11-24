@@ -61,8 +61,8 @@ class RetrievalRankingConfig:
 
     llm_enabled: bool = True
     llm_model: str = "qwen3.6-plus"
-    llm_top_n: int = 10
-    final_top_n: int = 8
+    llm_top_n: int = 15
+    final_top_n: int = 12
 
 
 @dataclass(frozen=True)
@@ -110,13 +110,13 @@ class QueryConfig:
             ),
             rewrite=RetrievalRewriteConfig(
                 enabled=get_bool_env("RAG_RETRIEVAL_REWRITE_ENABLED", True),
-                model=os.getenv("RAG_QUERY_REWRITE_MODEL", "qwen3.6-plus"),
+                model=os.getenv("RAG_QUERY_REWRITE_MODEL", "qwen3.8-max-0902"),
                 limit=int(os.getenv("RAG_RETRIEVAL_REWRITE_LIMIT", "3")),
             ),
             dependency=DependencyRecallConfig(
                 enabled=get_bool_env("RAG_DEPENDENCY_RECALL_ENABLED", True),
                 router_llm_enabled=get_bool_env("RAG_DEPENDENCY_ROUTER_LLM_ENABLED", True),
-                router_model=os.getenv("RAG_DEPENDENCY_ROUTER_MODEL", "qwen3.6-plus"),
+                router_model=os.getenv("RAG_DEPENDENCY_ROUTER_MODEL", "qwen3.8-max-0902"),
                 seed_score_ratio=float(os.getenv("RAG_DEPENDENCY_SEED_SCORE_RATIO", "0.6")),
                 max_seeds=int(os.getenv("RAG_DEPENDENCY_MAX_SEEDS", "10")),
                 seed_capability_weight=float(os.getenv("RAG_DEPENDENCY_SEED_CAPABILITY_WEIGHT", "0.3")),
@@ -128,13 +128,13 @@ class QueryConfig:
             ),
             ranking=RetrievalRankingConfig(
                 llm_enabled=get_bool_env("RAG_RERANK_LLM_ENABLED", True),
-                llm_model=os.getenv("RAG_RERANK_LLM_MODEL", "qwen3.6-plus"),
-                llm_top_n=int(os.getenv("RAG_RERANK_LLM_TOP_N", "10")),
-                final_top_n=int(os.getenv("RAG_RERANK_FINAL_TOP_N", "8")),
+                llm_model=os.getenv("RAG_RERANK_LLM_MODEL", "qwen3.8-max-0902"),
+                llm_top_n=int(os.getenv("RAG_RERANK_LLM_TOP_N", "15")),
+                final_top_n=int(os.getenv("RAG_RERANK_FINAL_TOP_N", "12")),
             ),
             answer=AnswerGenerationConfig(
                 enabled=get_bool_env("RAG_ANSWER_ENABLED", True),
-                model=os.getenv("RAG_ANSWER_MODEL", "qwen3.6-plus"),
+                model=os.getenv("RAG_ANSWER_MODEL", "qwen3.8-max-0902"),
                 context_top_k=int(os.getenv("RAG_ANSWER_CONTEXT_TOP_K", "4")),
                 max_context_chars=int(os.getenv("RAG_ANSWER_MAX_CONTEXT_CHARS", "1200")),
             ),

@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI
 
+from rag.retrieval.retired import usable_text
+
 if TYPE_CHECKING:
     from rag.retrieval.retriever import MetadataIndex, RetrievalCandidate
 
@@ -260,6 +262,15 @@ def expand_dependency_candidates(
                     target_id,
                     fallback_id,
                 )
+            target_metadata = metadata_index.metadata_by_id.get(resolved_id, {})
+            if usable_text(target_metadata) is None:
+                missing_count += 1
+                logger.warning(
+                    "依赖证据已废弃或已过时 | source_node_id=%s | target_node_id=%s",
+                    seed.node_id,
+                    resolved_id,
+                )
+                continue
             pending.append((float(edge["confidence"]), seed_rank, seed, edge, resolved_id))
 
     pending.sort(key=lambda item: (-item[0], item[1]))
@@ -276,10 +287,12 @@ def expand_dependency_candidates(
             continue
         candidate = by_id.get(resolved_id)
         metadata = dict(metadata_index.metadata_by_id.get(resolved_id, {}))
+        cleaned = usable_text(metadata) or ""
+        metadata["text"] = cleaned
         if candidate is None:
             candidate = RetrievalCandidate(
                 node_id=resolved_id,
-                text=str(metadata.get("text") or ""),
+                text=cleaned,
                 metadata=metadata,
             )
             expanded.append(candidate)
